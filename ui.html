@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>versa-bot</title>
+<style>
+/* Pink is the identity the user asked for. One saturated pink does the work (primary action, picked
+   item, countdown); everything else is warm neutrals. Green/amber/red only mark real submission states. */
+:root {
+  --bg: #fff5f8; --surface: #ffffff; --sunk: #fdecf2;
+  --line: #f0cfdc; --line-strong: #a87389;
+  --ink: #2b1621; --muted: #6b4a5a;
+  --pink: #c2255c; --pink-hover: #a61e4d; --on-pink: #ffffff; --pink-soft: #fde0eb; --pink-text: #a61e4d;
+  --ok: #22703a; --ok-soft: #e2f4e7; --warn: #8a4b00; --warn-soft: #fff0d9;
+  --off: #6a5d64; --off-soft: #f2edf0; --err: #b3261e; --err-soft: #fde8e6;
+  /* Segoe UI: it's a Windows desktop tool, so the native face reads as "app", and it works offline. */
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* Monospace only for the log, where timestamps need to line up. */
+  --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1016; --surface: #24161f; --sunk: #2c1b26;
+    --line: #452c3a; --line-strong: #9a7086;
+    --ink: #f8eaf1; --muted: #cbb0bf;
+    --pink: #f06595; --pink-hover: #f783ac; --on-pink: #2a0f1c; --pink-soft: #4b1d33; --pink-text: #f78fb3;
+    --ok: #8ce0a0; --ok-soft: #1d3626; --warn: #ffc978; --warn-soft: #3b2a12;
+    --off: #bcaab4; --off-soft: #30242b; --err: #ffb4ab; --err-soft: #4a1e1a;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
+[hidden] { display: none !important; }
+h1, h2, p { margin: 0; }
+button, input, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--pink); outline-offset: 2px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+button { cursor: pointer; border-radius: 8px; border: 1px solid transparent; padding: 9px 16px; min-height: 40px; transition: background-color .12s, border-color .12s; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+.primary { background: var(--pink); color: var(--on-pink); font-weight: 600; }
+.primary:hover:not(:disabled) { background: var(--pink-hover); }
+.ghost { background: transparent; border-color: var(--line-strong); }
+.ghost:hover:not(:disabled) { background: var(--sunk); }
+.danger { background: transparent; border-color: var(--err); color: var(--err); font-weight: 600; }
+.danger:hover:not(:disabled) { background: var(--err-soft); }
+.link { background: none; border: 0; padding: 4px 2px; min-height: 0; color: var(--pink-text); text-decoration: underline; text-underline-offset: 3px; }
+input[type=text], input[type=password], input[type=search], input[type=datetime-local], textarea {
+  width: 100%; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; padding: 9px 11px; min-height: 42px;
+}
+textarea { resize: vertical; min-height: 84px; }
+
+/* Login */
+.login { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; }
+.login-card { width: 100%; max-width: 380px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 28px; display: grid; gap: 14px;
+  box-shadow: 0 10px 30px -18px rgba(120, 20, 60, .45); /* the only floating surface in the app */ }
+.login-card h1 { font-size: 24px; line-height: 1.2; }
+.login-card h1 span { color: var(--pink-text); }
+.login-card label { display: grid; gap: 4px; font-weight: 600; font-size: 14px; }
+.fine { font-size: 13px; color: var(--muted); }
+.err { color: var(--err); background: var(--err-soft); border-radius: 8px; padding: 8px 12px; font-size: 14px; }
+
+/* Shell */
+.shell { display: flex; flex-direction: column; height: 100dvh; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.brand { font-weight: 700; font-size: 16px; }
+.brand span { color: var(--pink-text); }
+.who { margin-left: auto; color: var(--muted); font-size: 14px; }
+.banner { background: var(--err-soft); color: var(--err); padding: 8px 20px; font-size: 14px; }
+.app { flex: 1; min-height: 0; display: grid; grid-template-columns: 370px minmax(0, 1fr); }
+.side { background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; padding: 20px 20px 0; display: grid; gap: 22px; align-content: start; }
+.side h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: 22px; }
+
+/* Checklist */
+.checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.checklist li { display: grid; grid-template-columns: 20px 1fr; gap: 10px; align-items: start; font-size: 14px; color: var(--muted); }
+.checklist li.done { color: var(--ink); }
+.tick { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--line-strong); margin-top: 1px; position: relative; }
+.done .tick { background: var(--pink); border-color: var(--pink); }
+.done .tick::after { content: ""; position: absolute; left: 5px; top: 1.5px; width: 5px; height: 10px; border: solid var(--on-pink); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.checklist .val { overflow-wrap: anywhere; }
+
+/* The ticket: the assignment the bot is holding a spot for. Notches line up with the tear line. */
+.ticket { background: var(--pink-soft); border-radius: 12px; padding: 16px 18px; }
+.ticket .t-label { font-size: 13px; color: var(--muted); }
+.ticket .t-name { font-weight: 700; font-size: 17px; line-height: 1.3; overflow-wrap: anywhere; }
+.ticket .t-course { font-size: 14px; color: var(--muted); }
+.stub { position: relative; margin-top: 14px; padding-top: 14px; border-top: 2px dashed var(--line-strong); }
+.stub::before, .stub::after { content: ""; position: absolute; top: -10px; width: 18px; height: 18px; border-radius: 50%; background: var(--surface); }
+.stub::before { left: -28px; } .stub::after { right: -28px; }
+.big { font-size: 34px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; color: var(--pink-text); }
+.big.ok { color: var(--ok); } .big.bad { color: var(--err); }
+.t-when { font-size: 14px; }
+.t-result { margin-top: 8px; font-size: 14px; overflow-wrap: anywhere; }
+.ticket.empty { background: transparent; border: 2px dashed var(--line); color: var(--muted); font-size: 14px; }
+
+/* Files */
+.drop { border: 2px dashed var(--line-strong); border-radius: 10px; padding: 16px; text-align: center; display: grid; gap: 8px; justify-items: center; background: var(--sunk); }
+.drop.over { border-color: var(--pink); background: var(--pink-soft); }
+.drop p { font-size: 14px; color: var(--muted); }
+.files { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.files li { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 6px 6px 12px; font-size: 14px; }
+.files .fname { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.files .fmeta { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.files .ferr { color: var(--err); }
+.files button { min-height: 36px; padding: 4px 10px; font-size: 13px; }
+details { margin-top: 10px; font-size: 14px; }
+summary { cursor: pointer; color: var(--muted); padding: 4px 0; }
+details textarea { margin-top: 6px; }
+
+/* When */
+.opt { display: grid; grid-template-columns: 20px 1fr; gap: 10px; align-items: start; padding: 6px 0; font-size: 14px; cursor: pointer; }
+.opt input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--pink); }
+.opt small { display: block; color: var(--muted); font-size: 13px; }
+.opt.disabled { cursor: not-allowed; color: var(--muted); }
+#atInput { margin: 2px 0 8px 30px; width: calc(100% - 30px); }
+
+.actions { display: grid; gap: 8px; position: sticky; bottom: 0; background: var(--surface); padding: 12px 0 16px; border-top: 1px solid var(--line); }
+.actions button { width: 100%; min-height: 46px; font-size: 16px; }
+.why { font-size: 13px; color: var(--muted); text-align: center; }
+
+/* Browse */
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.browse { flex: 1; overflow-y: auto; padding: 22px 28px 28px; }
+.crumbs { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); margin-bottom: 6px; flex-wrap: wrap; }
+.head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.head h1 { font-size: 22px; line-height: 1.25; flex: 1; min-width: 200px; overflow-wrap: anywhere; }
+.sub { color: var(--muted); font-size: 14px; margin-bottom: 14px; }
+#filter { max-width: 280px; }
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.course { width: 100%; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; display: grid; gap: 2px; }
+.course:hover { border-color: var(--pink); }
+.course .cname { font-weight: 600; overflow-wrap: anywhere; }
+.course .ccat { font-size: 13px; color: var(--muted); }
+.assign { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 14px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 12px 12px 16px; }
+.assign.picked { border: 2px solid var(--pink); padding: 11px 11px 11px 15px; }
+.a-name { font-weight: 600; overflow-wrap: anywhere; }
+.a-dates { font-size: 13px; color: var(--muted); }
+.chip { font-size: 13px; font-weight: 600; padding: 3px 9px; border-radius: 6px; white-space: nowrap; }
+.chip.open, .chip.submitted { background: var(--ok-soft); color: var(--ok); }
+.chip.upcoming { background: var(--pink-soft); color: var(--pink-text); }
+.chip.closed, .chip.unknown { background: var(--off-soft); color: var(--off); }
+.chip.draft { background: var(--warn-soft); color: var(--warn); }
+.assign .pick { min-width: 84px; }
+.state { padding: 28px 4px; color: var(--muted); display: grid; gap: 10px; justify-items: start; }
+.state.bad { color: var(--err); }
+
+/* Log */
+.logpanel { height: 210px; border-top: 1px solid var(--line); background: var(--sunk); display: flex; flex-direction: column; }
+.logpanel h2 { font-size: 13px; font-weight: 600; color: var(--muted); padding: 8px 28px 4px; }
+#log { list-style: none; margin: 0; padding: 0 28px 10px; overflow-y: auto; flex: 1; font: 12.5px/1.6 var(--mono); }
+#log li { overflow-wrap: anywhere; }
+#log .lt { color: var(--muted); margin-right: 10px; }
+#log .hot { color: var(--pink-text); font-weight: 700; }
+#log .bad { color: var(--err); font-weight: 700; }
+#log .good { color: var(--ok); font-weight: 700; }
+#log .none { font-family: var(--sans); color: var(--muted); font-size: 13px; }
+
+@media (max-width: 860px) {
+  .shell { height: auto; min-height: 100dvh; }
+  .app { grid-template-columns: 1fr; }
+  .side { border-right: 0; border-bottom: 1px solid var(--line); overflow: visible; padding: 16px; }
+  .actions { position: static; margin: 0; padding: 12px 0 0; }
+  .browse { overflow: visible; padding: 18px 16px; }
+  .logpanel h2, #log { padding-left: 16px; padding-right: 16px; }
+  .assign { grid-template-columns: minmax(0, 1fr) auto; }
+  .assign .chip { grid-column: 1; justify-self: start; }
+  .assign .pick { grid-column: 2; grid-row: 1 / span 2; }
+  #filter { max-width: none; }
+  .topbar { padding: 10px 16px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div id="boot" class="login"><p class="fine" id="bootMsg">Starting...</p></div>
+
+<div id="login" class="login" hidden>
+  <form id="loginForm" class="login-card">
+    <h1>versa<span>-bot</span></h1>
+    <p class="fine">Pick an assignment, add your file, and the bot submits it the moment HEBAT opens it.</p>
+    <label>NIM <input type="text" id="nim" autocomplete="username" required></label>
+    <label>Password <input type="password" id="pw" autocomplete="current-password" required></label>
+    <p class="fine">Same login as UNAIR Satu. Your password stays in this app's memory and is never saved to disk.</p>
+    <p id="loginErr" class="err" role="alert" hidden></p>
+    <button class="primary" id="loginBtn">Log in</button>
+  </form>
+</div>
+
+<div id="shell" class="shell" hidden>
+  <header class="topbar">
+    <span class="brand">versa<span>-bot</span></span>
+    <span class="who" id="who"></span>
+    <button class="ghost" id="logoutBtn">Log out</button>
+  </header>
+  <p class="banner" id="connErr" role="alert" hidden></p>
+  <div class="app">
+    <aside class="side" aria-label="Bot setup">
+      <section>
+        <h2>Checklist</h2>
+        <ol class="checklist" id="checklist"></ol>
+      </section>
+      <section id="ticket" aria-live="polite"></section>
+      <fieldset id="setup">
+        <section>
+          <h2>File to submit</h2>
+          <div class="drop" id="drop">
+            <p>Drop your file here, or</p>
+            <button type="button" class="ghost" id="chooseBtn">Choose file</button>
+            <input type="file" id="fileInput" multiple hidden>
+          </div>
+          <ul class="files" id="fileList"></ul>
+          <details>
+            <summary>Online text (only if the assignment asks for it)</summary>
+            <textarea id="onlineText" aria-label="Online text"></textarea>
+          </details>
+        </section>
+        <section>
+          <h2>When to submit</h2>
+          <label class="opt" id="optOpen"><input type="radio" name="mode" value="open"><span>As soon as it opens<small id="opensHint"></small></span></label>
+          <label class="opt"><input type="radio" name="mode" value="time"><span>At a time I set (WIB)</span></label>
+          <input type="datetime-local" id="atInput" step="60" aria-label="Submit time, WIB">
+          <label class="opt"><input type="checkbox" id="finalize" checked><span>Also press "Submit assignment", so it's sent for grading<small>Turn off to leave it as a draft you can still edit.</small></span></label>
+        </section>
+      </fieldset>
+      <div class="actions" id="actions"></div>
+    </aside>
+    <main class="main">
+      <div class="browse" id="browse"></div>
+      <section class="logpanel" aria-label="Bot log">
+        <h2>Bot log</h2>
+        <ol id="log" aria-live="polite"><li class="none">Nothing yet. When the bot runs, every step shows up here.</li></ol>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script>
+const TOKEN = location.hash.slice(1);
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ACTIVE = ['starting', 'waiting', 'polling', 'submitting'];
+
+const S = {
+  user: null, offset: null, job: null, seq: 0, booted: false, connErr: null,
+  view: 'courses', courses: null, coursesErr: null, course: null, assigns: null, assignsErr: null,
+  picked: null, files: [], mode: 'open', at: '', actionErr: null,
+};
+
+async function api(path, { method = 'GET', body, raw, headers = {} } = {}) {
+  const opts = { method, headers: { 'X-Token': TOKEN, ...headers } };
+  if (raw) opts.body = raw;
+  else if (body !== undefined) { opts.body = JSON.stringify(body); opts.headers['Content-Type'] = 'application/json'; }
+  let res;
+  try { res = await fetch(path, opts); } catch { throw new Error("Can't reach the app. Is versa_bot.py still running?"); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+  return data;
+}
+
+function setHTML(el, html) { if (el.innerHTML !== html) el.innerHTML = html; }
+const running = () => !!S.job && ACTIVE.includes(S.job.state);
+const pad = (n) => String(n).padStart(2, '0');
+function fmtWIB(ts) {
+  const d = new Date((ts + 7 * 3600) * 1000);
+  const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()];
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+  return `${day} ${pad(d.getUTCDate())} ${mon} ${d.getUTCFullYear()}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+}
+const toInputValue = (ts) => new Date((ts + 7 * 3600) * 1000).toISOString().slice(0, 16);
+function countdown(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400), hms = `${pad(Math.floor(s % 86400 / 3600))}:${pad(Math.floor(s % 3600 / 60))}:${pad(s % 60)}`;
+  return d ? `${d}d ${hms}` : hms;
+}
+function roughly(sec) {
+  const m = Math.round(sec / 60);
+  if (m < 60) return `${Math.max(m, 1)}m`;
+  const h = Math.round(sec / 3600);
+  return h < 48 ? `${h}h` : `${Math.round(sec / 86400)}d`;
+}
+const fmtSize = (b) => b < 1024 * 1024 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`;
+
+/* The moment the bot should go, in epoch seconds, or null if it can't be worked out yet. */
+function targetTs() {
+  const a = S.picked;
+  if (!a) return null;
+  if (S.mode === 'open') {
+    if (a.availability === 'open') return Date.now() / 1000;
+    return a.availability === 'upcoming' && a.opens_ts ? a.opens_ts : null;
+  }
+  if (!S.at) return null;
+  const t = Date.parse(S.at.length > 16 ? `${S.at}+07:00` : `${S.at}:00+07:00`);
+  return Number.isNaN(t) ? null : t / 1000;
+}
+const readyFiles = () => S.files.filter((f) => f.status === 'ok');
+const onlineText = () => $('#onlineText').value.trim();
+
+/* ---------- polling ---------- */
+
+async function poll() {
+  try {
+    const d = await api(`/api/state?since=${S.seq}`);
+    const hadUser = !!S.user, wasRunning = running();
+    S.connErr = null;
+    S.user = d.user; S.offset = d.offset; S.job = d.job;
+    if (wasRunning && S.job && S.job.state === 'done') {
+      // Submitted: clear the setup so a second click can't send the same thing again, and show fresh statuses.
+      S.files.forEach((f) => f.id && api('/api/files/remove', { method: 'POST', body: { id: f.id } }).catch(() => {}));
+      S.picked = null; S.files = []; $('#onlineText').value = '';
+      renderFiles();
+      if (S.view === 'assigns') openCourse(S.course);
+    }
+    if (!S.booted) { $('#nim').value = d.saved_username || ''; S.booted = true; }
+    // Two polls can overlap (the timer plus one after a click), so skip entries the other one already added.
+    for (const l of d.logs) if (l.seq > S.seq) { addLog(l); S.seq = l.seq; }
+    if (S.user && !hadUser) loadCourses();
+  } catch (e) {
+    S.connErr = e.message;
+  }
+  render();
+}
+
+function render() {
+  if (!S.booted) {
+    $('#bootMsg').textContent = S.connErr || 'Starting...';
+    return;
+  }
+  $('#boot').hidden = true;
+  $('#login').hidden = !!S.user;
+  $('#shell').hidden = !S.user;
+  if (!S.user) return;
+  $('#who').textContent = `NIM ${S.user.username}`;
+  $('#logoutBtn').disabled = running();
+  $('#connErr').hidden = !S.connErr;
+  $('#connErr').textContent = S.connErr ? `${S.connErr} The page will keep retrying.` : '';
+  renderSide();
+}
+
+/* ---------- sidebar ---------- */
+
+function renderSide() {
+  const busy = running();
+  $('#setup').disabled = busy;
+  document.querySelectorAll('.pick').forEach((b) => { b.disabled = busy; });
+
+  const job = busy ? S.job : null, a = S.picked, t = targetTs();
+  const files = job ? job.files : readyFiles().map((f) => f.name);
+  const hasText = job ? job.has_text : !!onlineText();
+  const items = [
+    [!!S.user, `Logged in as ${S.user.username}`],
+    [S.offset != null, S.offset != null ? `Clock checked: ${S.offset >= 0 ? '+' : ''}${S.offset.toFixed(1)}s vs HEBAT` : 'Clock not checked yet (the bot checks when it starts)'],
+    [!!(job || a), job ? job.name : a ? a.name : 'Pick an assignment'],
+    [files.length > 0 || hasText, files.length ? files.join(', ') : hasText ? 'Online text' : 'Add your file'],
+    [!!(job || t), job ? `${job.target} WIB` : t ? (S.mode === 'open' && a.availability === 'open' ? 'Right away (it is open now)' : `${fmtWIB(t)} WIB`) : 'Choose when to submit'],
+  ];
+  setHTML($('#checklist'), items.map(([done, text]) =>
+    `<li class="${done ? 'done' : ''}"><span class="tick" aria-hidden="true"></span><span class="val"><span class="sr">${done ? 'Done: ' : 'To do: '}</span>${esc(text)}</span></li>`).join(''));
+
+  renderTicket();
+  renderWhen();
+  renderActions();
+}
+
+function renderTicket() {
+  const job = S.job, a = S.picked;
+  let html;
+  if (job) {
+    const st = job.state;
+    let stub;
+    if (st === 'starting' || st === 'waiting') {
+      stub = `<p class="t-label">Submits in</p><p class="big" id="cd">${job.go ? countdown(job.go - Date.now()) : '...'}</p><p class="t-when">${esc(job.target)} WIB</p>`;
+    } else if (st === 'polling') {
+      stub = `<p class="t-label">Right now</p><p class="big">Checking</p><p class="t-when">Asking HEBAT every 0.4s if it's open</p>`;
+    } else if (st === 'submitting') {
+      stub = `<p class="t-label">Right now</p><p class="big">Submitting</p><p class="t-when">It's open. Uploading and saving.</p>`;
+    } else if (st === 'done') {
+      stub = `<p class="t-label">Result</p><p class="big ok">Done</p><p class="t-result">${esc(job.result)}</p>`;
+    } else {
+      stub = `<p class="t-label">Result</p><p class="big bad">${st === 'stopped' ? 'Stopped' : 'Failed'}</p><p class="t-result">${esc(job.result)}</p>`;
+    }
+    html = `<div class="ticket"><p class="t-label">${running() ? 'Waiting for' : 'Last run'}</p><p class="t-name">${esc(job.name)}</p><p class="t-course">${esc(job.course)}</p><div class="stub">${stub}</div></div>`;
+  } else if (a) {
+    const t = targetTs();
+    const stub = t
+      ? `<p class="t-label">${t <= Date.now() / 1000 + 5 ? 'Submits' : 'Will submit in'}</p><p class="big" id="cd">${t <= Date.now() / 1000 + 5 ? 'Now' : esc(roughly(t - Date.now() / 1000))}</p><p class="t-when">${esc(fmtWIB(t))} WIB</p>`
+      : `<p class="t-label">Will submit</p><p class="t-when">Choose when to submit below.</p>`;
+    html = `<div class="ticket"><p class="t-label">Picked</p><p class="t-name">${esc(a.name)}</p><p class="t-course">${esc(a.course)}</p><div class="stub">${stub}</div></div>`;
+  } else {
+    html = `<div class="ticket empty">No assignment picked yet. Open a matkul and press <strong>Pick</strong> on the one the bot should wait for.</div>`;
+  }
+  setHTML($('#ticket'), html);
+}
+
+function renderWhen() {
+  const a = S.picked;
+  const canOpen = !!a && (a.availability === 'open' || (a.availability === 'upcoming' && !!a.opens_ts));
+  if (!canOpen && S.mode === 'open' && a) S.mode = 'time';
+  const openRadio = document.querySelector('input[name=mode][value=open]');
+  openRadio.disabled = !canOpen;
+  $('#optOpen').classList.toggle('disabled', !canOpen);
+  document.querySelectorAll('input[name=mode]').forEach((r) => { r.checked = r.value === S.mode; });
+  $('#atInput').hidden = S.mode !== 'time';
+  if ($('#atInput').value !== S.at && document.activeElement !== $('#atInput')) $('#atInput').value = S.at;
+  $('#opensHint').textContent = !a ? 'Pick an assignment first'
+    : a.availability === 'open' ? 'It is open now, so this submits right away'
+    : canOpen ? `${a.opens} WIB` : "HEBAT doesn't show an upcoming opening time. Set a time instead.";
+}
+
+function renderActions() {
+  const job = S.job;
+  let html;
+  if (running()) {
+    html = `<button class="danger" id="stopBtn">Stop bot</button><p class="why">Keep this app open and your laptop plugged in.</p>`;
+  } else {
+    const t = targetTs();
+    const missing = !S.picked ? 'Pick an assignment first.'
+      : !(readyFiles().length || onlineText()) ? 'Add your file first.'
+      : !t ? 'Choose when to submit.'
+      : S.files.some((f) => f.status === 'adding') ? 'Wait for your file to finish adding.' : '';
+    const now = t && t <= Date.now() / 1000 + 5;
+    html = (job ? `<button class="ghost" id="dismissBtn">Clear last result</button>` : '')
+      + `<button class="primary" id="startBtn" ${missing ? 'disabled' : ''}>${now ? 'Submit now' : 'Start waiting'}</button>`
+      + `<p class="why" ${S.actionErr ? 'role="alert"' : ''}>${esc(S.actionErr || missing || (now ? 'Submits immediately.' : 'The bot waits, then submits the second it opens.'))}</p>`;
+  }
+  setHTML($('#actions'), html);
+}
+
+function tick() {
+  const cd = $('#cd');
+  if (!cd) return;
+  if (S.job && S.job.go && running()) cd.textContent = countdown(S.job.go - Date.now());
+  else if (!S.job) renderSide();
+}
+
+/* ---------- browse ---------- */
+
+async function loadCourses() {
+  S.view = 'courses'; S.courses = null; S.coursesErr = null;
+  renderBrowse();
+  try { S.courses = (await api('/api/courses')).courses; } catch (e) { S.coursesErr = e.message; }
+  if (S.view === 'courses') renderBrowse();
+}
+
+async function openCourse(course) {
+  S.view = 'assigns'; S.course = course; S.assigns = null; S.assignsErr = null;
+  renderBrowse();
+  try { S.assigns = (await api(`/api/assignments?course=${course.id}`)).assignments; } catch (e) { S.assignsErr = e.message; }
+  if (S.course === course) renderBrowse();
+}
+
+function renderBrowse() {
+  const el = $('#browse');
+  if (S.view === 'courses') {
+    el.innerHTML = `<div class="head"><h1>Your matkul</h1><input type="search" id="filter" placeholder="Search matkul" aria-label="Search matkul"></div>
+      <p class="sub">Open the matkul that has the assignment you want the bot to submit.</p><div id="courseList"></div>`;
+    $('#filter').addEventListener('input', renderCourseList);
+    renderCourseList();
+    return;
+  }
+  const c = S.course;
+  let body;
+  if (S.assignsErr) body = `<div class="state bad" role="alert"><p>Couldn't load the assignments: ${esc(S.assignsErr)}</p><button class="ghost" data-act="reload">Try again</button></div>`;
+  else if (!S.assigns) body = `<p class="state" role="status">Loading assignments and their dates from HEBAT...</p>`;
+  else if (!S.assigns.length) body = `<p class="state">This matkul has no assignments on HEBAT yet.</p>`;
+  else body = `<ul class="list">${S.assigns.map(assignRow).join('')}</ul>`;
+  el.innerHTML = `<nav class="crumbs" aria-label="Location"><button class="link" data-act="back">All matkul</button><span aria-hidden="true">/</span><span>${esc(c.name)}</span></nav>
+    <div class="head"><h1>${esc(c.name)}</h1><button class="ghost" data-act="reload" ${S.assigns || S.assignsErr ? '' : 'disabled'}>Refresh</button></div>
+    <p class="sub">Pick the assignment the bot should wait for. Times are WIB.</p>${body}`;
+  document.querySelectorAll('.pick').forEach((b) => { b.disabled = running(); });
+}
+
+function renderCourseList() {
+  const el = $('#courseList');
+  if (!el) return;
+  if (S.coursesErr) return el.innerHTML = `<div class="state bad" role="alert"><p>Couldn't load your matkul: ${esc(S.coursesErr)}</p><button class="ghost" data-act="courses">Try again</button></div>`;
+  if (!S.courses) return el.innerHTML = `<p class="state" role="status">Loading your matkul from HEBAT...</p>`;
+  if (!S.courses.length) return el.innerHTML = `<p class="state">HEBAT doesn't list any matkul for your account.</p>`;
+  const q = ($('#filter')?.value || '').trim().toLowerCase();
+  const shown = S.courses.filter((c) => !q || `${c.name} ${c.category}`.toLowerCase().includes(q));
+  el.innerHTML = shown.length
+    ? `<ul class="list">${shown.map((c) => `<li><button class="course" data-course="${c.id}"><span class="cname">${esc(c.name)}</span>${c.category ? `<span class="ccat">${esc(c.category)}</span>` : ''}</button></li>`).join('')}</ul>`
+    : `<p class="state">No matkul matches "${esc(q)}".</p>`;
+}
+
+function assignRow(a) {
+  const now = Date.now() / 1000;
+  let chip;
+  if (a.error) chip = ['unknown', "Couldn't load"];
+  else if (a.state === 'submitted') chip = ['submitted', 'Submitted'];
+  else if (a.state === 'draft') chip = ['draft', 'Draft, not submitted'];
+  else if (a.availability === 'open') chip = ['open', 'Open now'];
+  else if (a.availability === 'upcoming') chip = ['upcoming', `Opens in ${roughly(a.opens_ts - now)}`];
+  else if (a.availability === 'locked') chip = ['closed', 'Locked'];
+  else chip = ['closed', 'Closed'];
+  const dates = a.error ? a.error
+    : a.lock_note ? `Locked on HEBAT: ${a.lock_note}`
+    : [a.opens && `${a.opens_ts > now ? 'Opens' : 'Opened'} ${a.opens}`, a.due && `Due ${a.due}`].filter(Boolean).join('  ·  ') || 'HEBAT shows no dates for this one';
+  const picked = S.picked && S.picked.cmid === a.cmid;
+  return `<li class="assign ${picked ? 'picked' : ''}">
+    <div><p class="a-name">${esc(a.name)}</p><p class="a-dates">${esc(dates)}</p></div>
+    <span class="chip ${chip[0]}">${esc(chip[1])}</span>
+    <button class="${picked ? 'primary' : 'ghost'} pick" data-pick="${a.cmid}" aria-pressed="${picked}">${picked ? 'Picked' : 'Pick'}</button>
+  </li>`;
+}
+
+function pick(cmid) {
+  const a = S.assigns.find((x) => x.cmid === cmid);
+  S.picked = { ...a, course: S.course.name };
+  S.actionErr = null;
+  if (S.job) { S.job = null; api('/api/dismiss', { method: 'POST', body: {} }).catch(() => {}); }  // a new pick replaces the last result
+  const canOpen = a.availability === 'open' || (a.availability === 'upcoming' && a.opens_ts);
+  S.mode = canOpen ? 'open' : 'time';
+  S.at = a.opens_ts && a.opens_ts > Date.now() / 1000 ? toInputValue(a.opens_ts) : '';
+  renderBrowse();
+  renderSide();
+}
+
+/* ---------- files ---------- */
+
+async function addFiles(list) {
+  for (const f of list) {
+    const item = { id: null, name: f.name, size: f.size, status: 'adding' };
+    S.files.push(item);
+    renderFiles();
+    try {
+      Object.assign(item, await api('/api/files', { method: 'POST', raw: f, headers: { 'X-Filename': encodeURIComponent(f.name) } }), { status: 'ok' });
+    } catch (e) {
+      item.status = 'error'; item.err = e.message;
+    }
+    renderFiles();
+  }
+}
+
+async function removeFile(i) {
+  const [f] = S.files.splice(i, 1);
+  renderFiles();
+  if (f.id) api('/api/files/remove', { method: 'POST', body: { id: f.id } }).catch(() => {});
+}
+
+function renderFiles() {
+  $('#fileList').innerHTML = S.files.map((f, i) => `<li>
+    <span class="fname">${esc(f.name)}</span>
+    <span class="fmeta ${f.status === 'error' ? 'ferr' : ''}">${f.status === 'adding' ? 'Adding...' : f.status === 'error' ? esc(f.err) : fmtSize(f.size)}</span>
+    <button type="button" class="ghost" data-remove="${i}" aria-label="Remove ${esc(f.name)}">Remove</button></li>`).join('');
+  renderSide();
+}
+
+/* ---------- log ---------- */
+
+function addLog(l) {
+  const box = $('#log');
+  box.querySelector('.none')?.remove();
+  const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+  const li = document.createElement('li');
+  const cls = /^FAILED/.test(l.msg) ? 'bad' : /^OPEN!/.test(l.msg) ? 'hot' : /^Submitted|Saved and submitted/.test(l.msg) ? 'good' : '';
+  li.innerHTML = `<span class="lt">${esc(l.t)}</span><span class="${cls}">${esc(l.msg)}</span>`;
+  box.append(li);
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+/* ---------- events ---------- */
+
+$('#loginForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = $('#loginBtn'), err = $('#loginErr');
+  btn.disabled = true; btn.textContent = 'Logging in...'; err.hidden = true;
+  try {
+    await api('/api/login', { method: 'POST', body: { username: $('#nim').value, password: $('#pw').value } });
+    $('#pw').value = '';
+    await poll();
+  } catch (ex) {
+    err.textContent = ex.message; err.hidden = false;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Log in';
+  }
+});
+
+$('#logoutBtn').addEventListener('click', async () => {
+  try {
+    await api('/api/logout', { method: 'POST', body: {} });
+    Object.assign(S, { courses: null, course: null, assigns: null, picked: null, view: 'courses' });
+    await poll();
+  } catch (e) { S.connErr = e.message; render(); }
+});
+
+$('#browse').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.course) openCourse(S.courses.find((c) => c.id === Number(b.dataset.course)));
+  else if (b.dataset.pick) pick(Number(b.dataset.pick));
+  else if (b.dataset.act === 'back') { S.view = 'courses'; S.courses ? renderBrowse() : loadCourses(); }
+  else if (b.dataset.act === 'courses') loadCourses();
+  else if (b.dataset.act === 'reload') openCourse(S.course);
+});
+
+$('#actions').addEventListener('click', async (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  S.actionErr = null;
+  try {
+    if (b.id === 'startBtn') {
+      b.disabled = true;
+      await api('/api/start', { method: 'POST', body: {
+        cmid: S.picked.cmid, name: S.picked.name, course: S.picked.course, at: targetTs(),
+        finalize: $('#finalize').checked, online_text: onlineText(), files: readyFiles().map((f) => f.id),
+      } });
+    } else if (b.id === 'stopBtn') {
+      await api('/api/stop', { method: 'POST', body: {} });
+    } else if (b.id === 'dismissBtn') {
+      await api('/api/dismiss', { method: 'POST', body: {} });
+    }
+  } catch (ex) {
+    S.actionErr = ex.message;
+  }
+  await poll();
+});
+
+$('#chooseBtn').addEventListener('click', () => $('#fileInput').click());
+$('#fileInput').addEventListener('change', (e) => { addFiles([...e.target.files]); e.target.value = ''; });
+$('#fileList').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-remove]');
+  if (b) removeFile(Number(b.dataset.remove));
+});
+const drop = $('#drop');
+['dragenter', 'dragover'].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); if (!running()) drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((t) => drop.addEventListener(t, () => drop.classList.remove('over')));
+drop.addEventListener('drop', (e) => { if (!running()) addFiles([...e.dataTransfer.files]); });
+// A file dropped anywhere else would make the window navigate away from the app.
+['dragover', 'drop'].forEach((t) => window.addEventListener(t, (e) => e.preventDefault()));
+
+document.querySelectorAll('input[name=mode]').forEach((r) => r.addEventListener('change', () => { S.mode = r.value; renderSide(); }));
+$('#atInput').addEventListener('input', (e) => { S.at = e.target.value; renderSide(); });
+$('#onlineText').addEventListener('input', renderSide);
+$('#finalize').addEventListener('change', renderSide);
+
+if (!TOKEN) {
+  $('#bootMsg').textContent = 'Open this app by running versa_bot.py, which opens the right link for you.';
+} else {
+  poll();
+  setInterval(poll, 1000);
+  setInterval(tick, 250);
+}
+</script>
+</body>
+</html>

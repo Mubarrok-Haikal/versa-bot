@@ -1,0 +1,7 @@
+# Your NIM, remembered between runs. Keep it out of the repo.
+hebat_settings.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/

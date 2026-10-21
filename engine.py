@@ -7,7 +7,7 @@ import re
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
@@ -17,7 +17,9 @@ from bs4 import BeautifulSoup
 BASE = os.environ.get("HEBAT_BASE", "https://hebat.elearning.unair.ac.id").rstrip("/")
 WIB = timezone(timedelta(hours=7))
 FAST_POLL, SLOW_POLL, FAST_WINDOW = 0.5, 3.0, 120  # seconds between checks, and how long to keep checking fast
-BURST_GAP, BURST_UNTIL, BURST_MAX = 0.2, 5, 4  # until 5s after the target: a check every 0.2s, up to 4 at once
+BURST_GAP, BURST_UNTIL, BURST_MAX = 0.2, 5, 4  # until 5s after the target: a check every 0.2s, up to 4 at once,
+                                                # each on its own login
+SCOUT_EVERY = 4  # with blind saves, every 4th check still loads the form, in case HEBAT won't take a blind one
 MAX_WAIT = 30 * 60  # stop polling this long after the target time
 
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "mei": 5, "jun": 6, "jul": 7, "aug": 8, "agu": 8,
@@ -102,6 +104,28 @@ def find_form(page, action):
     return marker.find_parent("form") if marker else None
 
 
+def find_form_fast(text, action):
+    """find_form on just that <form>, cut out of the page first: parsing a whole Moodle page takes a while, and
+    this runs at the moment it counts."""
+    i = text.find(f'value="{action}"')
+    if i < 0:
+        return None
+    start, end = text.rfind("<form", 0, i), text.find("</form>", i)
+    snippet = text[start:end + 7] if 0 <= start and 0 <= end else text
+    return find_form(parse(snippet), action) or find_form(parse(text), action)
+
+
+def accepted(r):
+    """Moodle answers a form it accepted on the assignment page with a redirect back to that page."""
+    if r.is_redirect:
+        return "/mod/assign/view.php" in r.headers.get("Location", "")
+    return bool(re.search(r'http-equiv="refresh"[^>]*/mod/assign/view\.php', r.text))  # redirect page, debug mode
+
+
+def text_html(online_text):
+    return "".join(f"<p>{html.escape(line)}</p>" for line in online_text.splitlines() if line.strip())
+
+
 def form_data(form):
     """What a browser would send for this form if you just clicked its main button."""
     data = {}
@@ -165,6 +189,15 @@ class Hebat:
         with self.login_lock:
             if self.logged_in_at < started:  # skip if another thread logged in while we waited
                 self._login()
+
+    def alive(self):
+        """Whether this login still works. Some Moodle sites cap how many logins an account can have at once and
+        end the oldest."""
+        try:
+            self.ajax("core_session_touch", {}, retry=False)
+            return True
+        except (HebatError, requests.RequestException):
+            return False
 
     def _login(self):
         self.s.cookies.clear()
@@ -370,12 +403,28 @@ class Hebat:
             r = self.s.get(url, timeout=15, allow_redirects=False)
         if r.is_redirect:  # still locked: HEBAT bounces you to the course page, no need to download it
             return None, r
-        if "savesubmission" not in r.text:  # not open yet; skip parsing the whole page
-            return None, r
-        return find_form(parse(r.text), "savesubmission"), r
+        return find_form_fast(r.text, "savesubmission"), r
+
+    def blind_save(self, cmid, draft_itemid, online_text):
+        """Send the submission without loading the form first. The form only ever asks for these fields, and HEBAT
+        refuses the save untouched while the assignment is closed. Returns (saved, form, response): form is set
+        when HEBAT showed the form instead (open, but it wanted something else)."""
+        data = {"id": cmid, "userid": self.user_id, "action": "savesubmission", "sesskey": self.sesskey,
+                "_qf__mod_assign_submission_form": "1", "submissionstatement": "1", "submitbutton": "Save changes"}
+        if draft_itemid is not None:
+            data["files_filemanager"] = draft_itemid
+        if online_text:
+            data.update({"onlinetext_editor[text]": text_html(online_text), "onlinetext_editor[format]": "1",
+                         "onlinetext_editor[itemid]": random.randint(100_000_000, 999_999_999)})
+        r = self.post("/mod/assign/view.php", timeout=15, data=data, allow_redirects=False)
+        if accepted(r):
+            return True, None, r
+        if r.is_redirect and "/login/index.php" in r.headers.get("Location", ""):
+            self.relogin()
+        return False, find_form_fast(r.text, "savesubmission"), r
 
     def save(self, cmid, form, draft_itemid, online_text, log):
-        """Fill in and save the submission form. Returns the submission state HEBAT shows afterwards."""
+        """Fill in and save the submission form. Raises if HEBAT didn't take it."""
         data = form_data(form)
         takes_files, takes_text = "files_filemanager" in data, "onlinetext_editor[text]" in data
         if draft_itemid is not None:
@@ -385,8 +434,7 @@ class Hebat:
                 log("This assignment doesn't take files, so they're left out.")
         if online_text:
             if takes_text:
-                data["onlinetext_editor[text]"] = "".join(
-                    f"<p>{html.escape(line)}</p>" for line in online_text.splitlines() if line.strip())
+                data["onlinetext_editor[text]"] = text_html(online_text)
             else:
                 log("This assignment doesn't take online text, so it's left out.")
         if not ((draft_itemid is not None and takes_files) or (online_text and takes_text)):
@@ -394,7 +442,10 @@ class Hebat:
         if form.find(attrs={"name": "submissionstatement"}):
             data["submissionstatement"] = "1"
 
-        page = parse(self.post("/mod/assign/view.php", data=data).text)
+        r = self.post("/mod/assign/view.php", data=data, allow_redirects=False)  # don't wait for the next page
+        if accepted(r):
+            return
+        page = parse(r.text)
         if find_form(page, "savesubmission"):  # Moodle shows the form again when it rejects it
             errors = [e.get_text(" ", strip=True) for e in page.select(".invalid-feedback, .alert-danger, .error")]
             raise HebatError("HEBAT rejected the submission: " + ("; ".join(filter(None, errors)) or "no reason shown"))
@@ -402,7 +453,13 @@ class Hebat:
         if state not in ("draft", "submitted"):
             raise HebatError(f"HEBAT didn't record the submission (status: {STATE_LABELS.get(state, 'no attempt')}). "
                              "Check HEBAT now and submit by hand!")
-        return state
+
+    def submit_for_grading(self, cmid):
+        """The 'Submit assignment' step, sent without loading its page first: that form only ever holds these
+        fields. True if HEBAT took it. Harmless on a submission that's already submitted."""
+        return accepted(self.post("/mod/assign/view.php", allow_redirects=False, data={
+            "id": cmid, "action": "confirmsubmit", "sesskey": self.sesskey,
+            "_qf__mod_assign_confirm_submission_form": "1", "submissionstatement": "1", "submitbutton": "Continue"}))
 
     def finalize(self, cmid):
         """The 'Submit assignment' step, for assignments that keep submissions as drafts until you confirm."""
@@ -412,7 +469,7 @@ class Hebat:
         data = form_data(conf)
         if conf.find(attrs={"name": "submissionstatement"}):
             data["submissionstatement"] = "1"
-        self.post("/mod/assign/view.php", data=data)
+        self.post("/mod/assign/view.php", data=data, allow_redirects=False)
         if self.assignment_info(cmid)["state"] != "submitted":
             raise HebatError("Saved as DRAFT, but 'Submit assignment' didn't go through. Submit it by hand!")
 
@@ -431,6 +488,7 @@ class Runner(threading.Thread):
         self.go = None  # this PC's timestamp for job["at"], after correcting for clock drift
         self.result = None
         self.last_hiccup = 0.0
+        self.bots = [bot]  # one login per overlapping check; see more_logins
 
     def stop(self):
         self.stop_flag.set()
@@ -488,6 +546,24 @@ class Runner(threading.Thread):
                 self.log(f"Logging in again: HEBAT didn't answer ({e.__class__.__name__}). Retrying.")
                 self.pause(5)
 
+    def more_logins(self):
+        """Extra logins for the checks around the target time. HEBAT (Moodle) locks a login's session while it
+        answers a request, so overlapping checks on one login just wait in line on the server, and the save would
+        wait behind them too. Logins that HEBAT ends straight away (a cap on logins per account) are dropped."""
+        def login():
+            bot = Hebat(self.bot.username, self.bot.password)
+            bot.login()
+            return bot
+
+        pool = ThreadPoolExecutor(BURST_MAX)
+        done, _ = wait([pool.submit(login) for _ in range(BURST_MAX - 1)], timeout=max(self.go - 25 - time.time(), 0))
+        bots = [self.bot] + [f.result() for f in done if not f.exception()]
+        checks = {pool.submit(b.alive): b for b in bots}
+        done, _ = wait(checks, timeout=max(self.go - 15 - time.time(), 0))
+        pool.shutdown(wait=False, cancel_futures=True)  # anything still out is too slow to count on
+        self.bots = [checks[f] for f in done if f.result()] or [self.bot]
+        self.log(f"Ready with {len(self.bots)} separate logins for checking.")
+
     def work(self):
         job, cmid = self.job, self.job["cmid"]
         self.go = job["at"].timestamp()
@@ -513,51 +589,80 @@ class Runner(threading.Thread):
             except (HebatError, requests.RequestException) as e:
                 self.log(f"Early upload didn't work ({e}); will upload the moment it opens instead.")
 
+        if not immediate and self.go - time.time() > 30:
+            self.more_logins()
+
+        # With the files already up (or only text to send), the checks are the save itself; see wait_for_form.
+        blind = not immediate and (draft is not None or not job["files"])
         self.sleep_until(self.go - 3)
         self.state = "polling"
         self.log("Checking HEBAT for the submission form...")
-        form, page_html = self.wait_for_form()
+        bot, form, page_html = self.wait_for_form(blind, draft)
         self.state = "submitting"
-        self.log("Got the submission form." if immediate else f"OPEN! ({time.time() - self.go:+.2f}s from the target time)")
-        if job["files"] and draft is None:
-            repo = self.bot.upload_repo_id(page_html)
-            if not repo:
-                raise HebatError("Can't find HEBAT's file upload on the submission page. Submit by hand, quick!")
-            draft = self.bot.upload_draft(job["files"], repo)
+        if form is None:
+            self.log(f"OPEN! Saved straight away ({time.time() - self.go:+.2f}s from the target time).")
+        else:
+            self.log("Got the submission form." if immediate else f"OPEN! ({time.time() - self.go:+.2f}s from the target time)")
+            if job["files"] and draft is None:
+                repo = bot.upload_repo_id(page_html)
+                if not repo:
+                    raise HebatError("Can't find HEBAT's file upload on the submission page. Submit by hand, quick!")
+                draft = bot.upload_draft(job["files"], repo)
+            self.save_with_retries(bot, form, draft, before)
+            self.log(f"Saved ({time.time() - self.go:+.2f}s from the target time)." if not immediate else "Saved.")
+        if job["finalize"] and self.soft("Submitting for grading", lambda: bot.submit_for_grading(cmid)):
+            self.log("Pressed 'Submit assignment'." if immediate else
+                     f"Pressed 'Submit assignment' ({time.time() - self.go:+.2f}s from the target time).")
 
-        state = self.save_with_retries(form, draft, before)
-        self.log("Saved." if state == "draft" else "Saved and submitted.")
+        state = bot.assignment_info(cmid)["state"]  # check what HEBAT actually recorded
         if state == "draft" and job["finalize"]:
-            self.bot.finalize(cmid)
+            bot.finalize(cmid)  # the quick way didn't go through: the slow way, which loads the page first
             state = "submitted"
-            self.log("Submitted for grading.")
+        if state not in ("draft", "submitted"):
+            raise HebatError(f"HEBAT didn't record the submission (status: {STATE_LABELS.get(state, 'no attempt')}). "
+                             "Check HEBAT now and submit by hand!")
         self.state = "done"
         self.result = (f"Submitted for grading at {datetime.now(WIB):%H:%M:%S} WIB." if state == "submitted" else
                        "Saved as a DRAFT (you turned off 'Submit assignment'). Submit it on HEBAT when ready.")
         self.log(self.result)
 
-    def wait_for_form(self):
-        """Ask HEBAT for the submission form until it shows up. Around the target time the checks overlap: a new
-        one every 0.2s without waiting for the last answer, so the opening is seen about one page load after it
-        happens instead of up to two."""
-        hits = queue.Queue()  # (form, page_html), or an error the main loop should raise
-        lock, in_flight = threading.Lock(), [0]
+    def wait_for_form(self, blind, draft):
+        """Ask HEBAT until the assignment opens. Returns (bot, form, page_html): the login that got in, and the
+        form it was shown, or form None when a blind save already went through.
 
-        def check():
+        Around the target time the checks overlap: a new one every 0.2s without waiting for the last answer, each
+        on its own login, so the opening is seen about one page load after it happens instead of up to two.
+        With `blind`, the checks send the save itself instead of loading the form: HEBAT refuses it while the
+        assignment is closed and takes it the moment it opens, a whole page load sooner. Every few checks still
+        load the form, so a save HEBAT won't take blind falls back to the usual way."""
+        hits = queue.Queue()  # (bot, form, page_html), or an error the main loop should raise
+        free = queue.Queue()  # logins with no check out, so no two requests share one
+        for b in self.bots:
+            free.put(b)
+
+        def check(bot, save):
+            hit = None
             try:
-                form, r = self.bot.edit_form(self.job["cmid"])
-                if form:
-                    hits.put((form, r.text))
+                if save:
+                    saved, form, r = bot.blind_save(self.job["cmid"], draft, self.job["online_text"])
+                    if saved or form:
+                        hit = (bot, None if saved else form, r.text)
+                else:
+                    form, r = bot.edit_form(self.job["cmid"])
+                    if form:
+                        hit = (bot, form, r.text)
             except requests.RequestException as e:
                 self.hiccup(e)
             except Exception as e:  # e.g. logging in again failed: that ends the run
-                hits.put(e)
+                hit = e
             finally:
-                with lock:
-                    in_flight[0] -= 1
+                if hit:  # keep that login out of the pool: the submission carries on with it
+                    hits.put(hit)
+                else:
+                    free.put(bot)
 
-        pool = ThreadPoolExecutor(BURST_MAX)
-        deadline, slow_logged = self.go + MAX_WAIT, False
+        pool = ThreadPoolExecutor(len(self.bots))
+        deadline, slow_logged, sent = self.go + MAX_WAIT, False, 0
         try:
             while True:
                 if self.stop_flag.is_set():
@@ -569,15 +674,17 @@ class Runner(threading.Thread):
                     slow_logged = True
                     self.log("Still not open after 2 minutes. Checking every 3 seconds now.")
                 burst = now < self.go + BURST_UNTIL
-                with lock:
-                    send = in_flight[0] < (BURST_MAX if burst else 1)
-                    if send:
-                        in_flight[0] += 1
-                if send:
-                    pool.submit(check)
+                if burst or free.qsize() == len(self.bots):  # after the burst, one check at a time
+                    try:
+                        bot = free.get_nowait()
+                    except queue.Empty:
+                        bot = None
+                    if bot:
+                        sent += 1
+                        pool.submit(check, bot, blind and sent % SCOUT_EVERY != 0)
                 gap = BURST_GAP if burst else FAST_POLL if now < self.go + FAST_WINDOW else SLOW_POLL
                 try:
-                    got = hits.get(timeout=gap)  # returns the moment a check finds the form
+                    got = hits.get(timeout=gap)  # returns the moment a check gets in
                 except queue.Empty:
                     continue
                 if isinstance(got, Exception):
@@ -592,19 +699,19 @@ class Runner(threading.Thread):
             self.last_hiccup = now
             self.log(f"Network hiccup ({e.__class__.__name__}), retrying")
 
-    def save_with_retries(self, form, draft, before):
+    def save_with_retries(self, bot, form, draft, before):
         cmid = self.job["cmid"]
         for attempt in range(1, 4):
             try:
-                return self.bot.save(cmid, form, draft, self.job["online_text"], self.log)
+                return bot.save(cmid, form, draft, self.job["online_text"], self.log)
             except requests.RequestException as e:
                 self.log(f"Network error while saving ({e.__class__.__name__}), attempt {attempt} of 3.")
             time.sleep(1)
             try:  # the save may have gone through even though the answer got lost
-                state = self.bot.assignment_info(cmid)["state"]
+                state = bot.assignment_info(cmid)["state"]
                 if state == "submitted" or (state == "draft" and before != "draft"):
-                    return state
-                form, _ = self.bot.edit_form(cmid)
+                    return
+                form, _ = bot.edit_form(cmid)
             except requests.RequestException:
                 continue
             if not form:

@@ -75,12 +75,17 @@ assignment on HEBAT to see your file there.
 |---|---|
 | You press Start | Compares your PC's clock with HEBAT's, so the bot aims at HEBAT's time, not your PC's |
 | While waiting | Sleeps, and stops Windows from going to sleep |
-| 2 minutes before | Logs in again for a fresh session, re-checks the clock and uploads your file ahead of time |
-| 3 seconds before | Checks whether the submission form is open every 0.2 seconds, with up to 4 checks in flight so a slow reply doesn't hold up the next one |
+| 2 minutes before | Logs in again for a fresh session, re-checks the clock, uploads your file ahead of time and opens 3 extra logins |
+| 3 seconds before | Sends the save itself every 0.2 seconds, each on its own login, with up to 4 in flight. HEBAT refuses it while the assignment is closed and takes it the moment it opens. Every 4th check loads the form instead, in case HEBAT won't take the quick save |
 | 5 seconds after | If it still hasn't opened, checks every 0.5 seconds |
-| When it opens | Attaches the uploaded file, saves, presses "Submit assignment", then confirms HEBAT recorded it |
+| When it opens | Presses "Submit assignment" straight away, then confirms HEBAT recorded it |
 | 2 minutes after | If it still hasn't opened, checks every 3 seconds instead |
 | 30 minutes after | If it still hasn't opened, stops and tells you, so you can submit by hand |
+
+Why it's quick: HEBAT (Moodle) answers one request per login at a time, so checks that share a login wait in
+line on the server. Giving each check its own login means they really run side by side. Sending the save
+without loading the form first, and not waiting for the page HEBAT shows after each step, saves about two
+page loads more.
 
 If HEBAT is slow to respond while the bot waits, the bot logs it and keeps going. It only stops on
 errors that actually prevent the submission.
@@ -89,7 +94,8 @@ errors that actually prevent the submission.
 
 **Will it get logged out if it waits for days?**
 No problem. It logs in again 2 minutes before the opening, and again automatically if HEBAT ever sends
-it to the login page. Your HEBAT login in the browser is not affected.
+it to the login page. Your HEBAT login in the browser is not affected, unless HEBAT limits how many logins
+one account can have at once: then the bot's extra logins can log your browser out. Just log in there again.
 
 **Can I close the app while it waits?**
 No. Closing the app stops the bot. Minimise it instead.

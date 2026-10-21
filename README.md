@@ -76,7 +76,8 @@ assignment on HEBAT to see your file there.
 | You press Start | Compares your PC's clock with HEBAT's, so the bot aims at HEBAT's time, not your PC's |
 | While waiting | Sleeps, and stops Windows from going to sleep |
 | 2 minutes before | Logs in again for a fresh session, re-checks the clock and uploads your file ahead of time |
-| 3 seconds before | Checks whether the submission form is open, every 0.4 seconds |
+| 3 seconds before | Checks whether the submission form is open every 0.2 seconds, with up to 4 checks in flight so a slow reply doesn't hold up the next one |
+| 5 seconds after | If it still hasn't opened, checks every 0.5 seconds |
 | When it opens | Attaches the uploaded file, saves, presses "Submit assignment", then confirms HEBAT recorded it |
 | 2 minutes after | If it still hasn't opened, checks every 3 seconds instead |
 | 30 minutes after | If it still hasn't opened, stops and tells you, so you can submit by hand |

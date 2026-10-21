@@ -4,7 +4,8 @@ A desktop app that submits your assignment to **HEBAT UNAIR** (the university's 
 opens.
 
 Log in, open a matkul, pick the assignment, add your file and press **Start waiting**. When the
-assignment opens, the bot uploads and submits it for you, usually within a second.
+assignment opens, the bot attaches and submits it for you. Files are uploaded ahead of time when possible;
+actual timing depends on HEBAT and your connection.
 
 ## Features
 
@@ -66,45 +67,60 @@ python versa_bot.py --browser
 6. Press **Start waiting**, or **Submit now** if the assignment is already open.
 7. Keep the app open until the sidebar says **Done**.
 
-When it's done, the log shows `Submitted for grading at HH:MM:SS WIB`. It's still worth opening the
-assignment on HEBAT to see your file there.
+When it is done, the log confirms the submission status and the time of that confirmation. The time
+shown in the log is not a claim about Moodle's recorded modification time. Open the assignment on HEBAT
+to inspect the attached file and its recorded timestamp.
 
 ## How it works
 
 | When | What versa-bot does |
 |---|---|
-| You press Start | Measures how far your PC's clock is from HEBAT's, to about a hundredth of a second, so the bot aims at HEBAT's time, not your PC's |
-| While waiting | Sleeps, and stops Windows from going to sleep |
-| 2 minutes before | Logs in again for a fresh session, re-checks the clock, uploads your file ahead of time, checks whether HEBAT offers the mobile-app route, and opens extra logins |
-| 40 seconds before | Re-checks the clock once more |
-| 3 seconds before | Sends the save itself, without waiting for the last answer: every 0.25 seconds, and every 0.1 seconds (0.05 over the mobile-app route) from half a second before to 1.5 seconds after. HEBAT refuses it while the assignment is closed and takes it the moment it opens. Every 4th check outside that peak loads the form instead, in case HEBAT won't take the quick save |
-| 5 seconds after | If it still hasn't opened, checks every 0.5 seconds |
-| When it opens | Presses "Submit assignment" straight away (retrying quickly if HEBAT is overloaded), then confirms HEBAT recorded it |
-| 2 minutes after | If it still hasn't opened, checks every 3 seconds instead |
-| 30 minutes after | If it still hasn't opened, stops and tells you, so you can submit by hand |
+| You press Start | Checks available assignment rules and current submission status. Checks the server clock and uploads files immediately if the target is less than 3 days away |
+| While waiting | Stops Windows from sleeping. For targets farther away, defers the upload until preparation |
+| 5 minutes before | Refreshes the login, keeping the existing session unless the new login succeeds. Re-checks rules/status and prepares extra website logins |
+| 10 seconds before | Re-checks the server clock. Uses PHP's timestamp through Moodle's mobile API when available; explicitly labels the less precise HTTP Date fallback |
+| About 5 seconds and 1.2 seconds before | Warms connections in background, without holding up the submission loop |
+| 3 seconds before | Begins overlapping save attempts. The mobile route keeps only a few requests in flight outside the peak |
+| 0.4 seconds before through 0.1 seconds after | Uses a short, shaped burst, at most 40 save requests/second. Adapts the concurrency ceiling from 6 to 16 using measured latency and reserves slots for the opening second |
+| 0.1 seconds after | Stops launching mobile saves and waits for all outstanding answers. Sends another, single save only if every earlier save was explicitly refused because the assignment was not open |
+| First accepted save | The accepting worker immediately sends the prepared “Submit assignment” request, where needed, before logging progress |
+| Lost/blocked response or other refusal | Stops new saves, drains outstanding requests, and checks status. An ambiguous result is reported for manual inspection; it is not blindly retried |
+| 2 minutes after | If HEBAT still explicitly reports not open, reduces checks to every 3 seconds |
+| 30 minutes after | Drains requests, checks status once more, and stops if it cannot confirm a submission |
 
-Why it's quick:
+The preflight checks file/text support, file count, per-file size, allowed extensions, online-text word
+limits, and timed assignments when HEBAT exposes those rules. It expands named file-type groups using
+Moodle's own type list. Hidden rules or unavailable group definitions produce a warning. Timed assignments
+require you to start and submit the attempt on HEBAT manually; the bot does not start their timer.
+Refusals other than a recognized “not open yet” response stop the run with the server's reason.
 
-- **Each check gets its own login.** HEBAT (Moodle) answers one request per login at a time, so checks that
-  share a login wait in line on the server.
-- **The check is the save.** Sending the save without loading the form first, and not waiting for the page
-  HEBAT shows after each step, saves about two page loads.
-- **The mobile-app route, if HEBAT offers it.** This is the interface the Moodle phone app uses. Its requests
-  don't wait for each other and its answers are a few bytes instead of whole pages, so the bot can check more
-  often while putting less load on HEBAT. If HEBAT doesn't offer it, or it stops working, the bot uses the
-  website.
-- **Only the first save counts** (over the website). Saves still on their way when the first one lands are
-  refused, so they can't push the recorded time later. Over the mobile-app route they land within the same
-  fraction of a second.
+Why it is quick:
 
-If HEBAT is slow to respond or overloaded (errors like 503) while the bot waits, the bot logs it and keeps
-going, switching to another login if one keeps failing. It only stops on errors that actually prevent the
-submission.
+- **The check is the save.** Once the draft upload is ready, the bot sends the save itself instead of loading
+  a form first. The mobile save and submit requests are encoded before the burst.
+- **Independent website logins and the mobile API.** Website checks use separate sessions to avoid Moodle's
+  per-session lock. The mobile API uses lighter JSON responses, including for status checks.
+- **A bounded mobile burst.** In-flight saves can still change Moodle's recorded time, especially on assignments
+  with no separate submit step. The cutoff prevents new saves from extending that tail. It cannot cancel
+  requests already being processed, and does not guarantee an opening-second timestamp.
+- **Less work at the critical moment.** Form controls are extracted without constructing a full page DOM;
+  certificate stores and proxy configuration are loaded once per connection setup/session, not per request.
+  Normal TLS verification, custom CA bundles, and configured proxies remain supported.
+- **Windows timing.** During the short burst, the bot requests 1 ms timer resolution, disables process power
+  throttling where supported, and uses a monotonic performance clock for dispatch deadlines. It temporarily
+  disables cyclic garbage collection and restores all changed settings afterward, including on errors.
+- **Nonblocking console logs.** Console printing happens on a separate daemon thread with a bounded queue.
+  Selecting text in a Windows console cannot block the submission or the in-app log.
+
+HTTP errors, rate limits and challenge pages are outages, not evidence that an assignment is closed.
+A timed-out save may still complete on the server. The bot checks for a changed submission after draining
+requests; it will not report an unchanged, pre-existing submission as a newly recovered save. If status
+cannot establish the outcome, inspect HEBAT before trying again.
 
 ## FAQ
 
 **Will it get logged out if it waits for days?**
-No problem. It logs in again 2 minutes before the opening, and again automatically if HEBAT ever sends
+It attempts a fresh login 5 minutes before the opening, and again automatically if HEBAT ever sends
 it to the login page. Your HEBAT login in the browser is not affected, unless HEBAT limits how many logins
 one account can have at once: then the bot's extra logins can log your browser out. Just log in there again.
 
@@ -125,7 +141,8 @@ No. It runs at `127.0.0.1`, so other devices can't connect to it. It also needs 
 changes every launch, so websites open in your browser can't send it commands.
 
 **What if I change my UNAIR password while it's waiting?**
-The fresh login before the opening will fail. Stop the bot, log in again, and start it again.
+The fresh login may fail. The bot retains the previous session and warns you. If that session also expires,
+stop the bot, log in with the new password, and start it again.
 
 **An assignment says "Locked" but shows no opening date.**
 It's locked by a condition other than a date, such as a group or another activity. Use **At a time I
@@ -145,7 +162,28 @@ HEBAT_BASE=https://your.moodle.site python versa_bot.py
 | `versa_bot.py` | Entry point. Starts the app and opens the window |
 | `engine.py` | Logs in, reads HEBAT, waits, uploads and submits |
 | `ui.html` | The interface |
+| `forms.py` | Fast form-control extraction |
+| `runtime.py` | TLS/proxy setup and temporary timing settings |
+| `tests/test_engine.py` | Offline regression and delayed-response simulations |
 | `requirements.txt` | Python dependencies |
+
+## Verification
+
+Run the offline tests without contacting HEBAT or submitting any files:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+They exercise delayed responses, cutoff/concurrency behavior, refusal handling, timeout reconciliation,
+file rules, login rollback, parsing, clock selection, and timing-setting cleanup. Synthetic timing results
+are not a prediction of live HEBAT performance.
+
+The PHP timestamp source is `core_calendar_get_calendar_upcoming_view` → `date.timestamp`:
+[Moodle implementation](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/calendar/externallib.php)
+and [date export](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/calendar/classes/external/calendar_upcoming_exporter.php).
+The generic save-warning handling follows
+[Moodle's assignment API](https://github.com/moodle/moodle/blob/MOODLE_405_STABLE/mod/assign/externallib.php).
 
 ## Disclaimer
 

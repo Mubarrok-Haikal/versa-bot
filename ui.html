@@ -559,7 +559,7 @@ function addLog(l) {
   box.querySelector('.none')?.remove();
   const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
   const li = document.createElement('li');
-  const cls = /^FAILED/.test(l.msg) ? 'bad' : /^OPEN!/.test(l.msg) ? 'hot' : /^Submitted|Saved and submitted/.test(l.msg) ? 'good' : '';
+  const cls = /^FAILED/.test(l.msg) ? 'bad' : /^OPEN!/.test(l.msg) ? 'hot' : /^Submitted|Submission confirmed|Saved and submitted/.test(l.msg) ? 'good' : '';
   li.innerHTML = `<span class="lt">${esc(l.t)}</span><span class="${cls}">${esc(l.msg)}</span>`;
   box.append(li);
   if (stick) box.scrollTop = box.scrollHeight;

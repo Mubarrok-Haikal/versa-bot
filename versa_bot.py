@@ -8,6 +8,7 @@ Keep it running until the bot is done: closing it stops the bot. Your password i
 """
 import atexit
 import json
+import queue
 import secrets
 import shutil
 import sys
@@ -42,6 +43,16 @@ class App:
         self.logs = []
         self.seq = 0
         self.lock = threading.Lock()
+        self.console = queue.Queue(maxsize=1000)
+        threading.Thread(target=self.print_logs, daemon=True, name='console-log').start()
+
+    def print_logs(self):
+        while True:
+            line = self.console.get()
+            try:
+                print(line, flush=True)
+            except (OSError, ValueError):
+                pass  # GUI log remains available if the console closes.
 
     def log(self, msg):
         t = datetime.now(engine.WIB).strftime("%H:%M:%S.%f")[:-3]
@@ -49,7 +60,10 @@ class App:
             self.seq += 1
             self.logs.append({"seq": self.seq, "t": t, "msg": msg})
             del self.logs[:-1000]
-        print(f"[{t}] {msg}", flush=True)
+        try:
+            self.console.put_nowait(f"[{t}] {msg}")
+        except queue.Full:
+            pass  # A selected/paused Windows console must never block submission or the UI log.
 
     def busy(self):
         return self.runner is not None and self.runner.is_alive()

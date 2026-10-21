@@ -1,4 +1,4 @@
-"""HEBAT UNAIR (Moodle) client and the auto-submit runner. No UI code here; versa_bot.py drives it."""
+"""HEBAT Moodle client and scheduled submission runner."""
 import html
 import math
 import os
@@ -20,18 +20,18 @@ from runtime import AimClock, PrecisionWindow, new_session as make_session, wall
 
 BASE = os.environ.get("HEBAT_BASE", "https://hebat.elearning.unair.ac.id").rstrip("/")
 WIB = timezone(timedelta(hours=7))
-FAST_POLL, SLOW_POLL, FAST_WINDOW = 0.5, 3.0, 120  # seconds between checks, and how long to keep checking fast
-BURST_FROM, BURST_UNTIL, BURST_GAP = 3, 5, 0.25  # from 3s before the target to 5s after: checks overlap, 0.25s apart
+FAST_POLL, SLOW_POLL, FAST_WINDOW = 0.5, 3.0, 120  # poll intervals and fast-poll duration, in seconds
+BURST_FROM, BURST_UNTIL, BURST_GAP = 3, 5, 0.25  # burst window and interval, in seconds
 PEAK_FROM, PEAK_UNTIL, PEAK_GAP = 0.4, 0.1, 0.1
-LOGINS = 4  # website logins, one per overlapping check (2 when the mobile-app route does the saving)
-WS_GAP, WS_MAX = 0.025, 16  # at most 40/s, only in the half-second peak
-SAVE_CUTOFF = 0.1  # no new mobile saves after the aim point; drain all answers before any retry
+LOGINS = 4  # website sessions; reduced to 2 when mobile saves are available
+WS_GAP, WS_MAX = 0.025, 16  # peak mobile rate: 40/s, up to 16 concurrent requests
+SAVE_CUTOFF = 0.1  # mobile burst cutoff relative to target, in seconds
 PREPARE_FROM = 300
 EARLY_UPLOAD_MAX = 3 * 86400
-SCOUT_EVERY = 4  # with blind saves, every 4th check outside the peak loads the form, in case a blind one won't do
-CHECK_TIMEOUT = (3, 8)  # connect, read: an overloaded HEBAT shouldn't tie up a login for long
-CLOCK_PROBE = "/pix/i/loading.gif"  # a static file: the web server answers it without running Moodle
-MAX_WAIT = 30 * 60  # stop polling this long after the target time
+SCOUT_EVERY = 4  # load the website form every fourth check outside the peak
+CHECK_TIMEOUT = (3, 8)  # connect and read timeouts, in seconds
+CLOCK_PROBE = "/pix/i/loading.gif"  # static endpoint for connection warmup and HTTP Date fallback
+MAX_WAIT = 30 * 60  # polling deadline relative to target
 
 MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "mei": 5, "jun": 6, "jul": 7, "aug": 8, "agu": 8,
           "agt": 8, "sep": 9, "oct": 10, "okt": 10, "nov": 11, "nop": 11, "dec": 12, "des": 12}
@@ -40,7 +40,7 @@ DATE_MDY = re.compile(r"([A-Za-z]{3,})\.?\s+(\d{1,2}),?\s+(\d{4}),?\s+(\d{1,2})[
 DAY_ONLY = re.compile(r"(\d{1,2})\s+([A-Za-z]{3,})\.?\s+(\d{4})")
 OPEN_WORDS = ("open", "buka", "mulai")
 DUE_WORDS = ("due", "tenggat", "batas", "jatuh tempo", "tutup", "close")
-# Restrict access notes: "Available from <strong>27 October 2026, 7:00 AM</strong>", "It is before ...", Indonesian too.
+# English and Indonesian Restrict access date labels.
 LOCK_FROM_WORDS = ("from", "after", "dari", "setelah", "sejak", "mulai")
 LOCK_UNTIL_WORDS = ("until", "before", "sampai", "hingga", "sebelum")
 STATE_CLASS = re.compile(r"^submissionstatus(submitted|draft|new|reopened)$")
@@ -48,11 +48,11 @@ STATE_LABELS = {"submitted": "Submitted", "draft": "Draft (not submitted)", "reo
 
 
 class HebatError(Exception):
-    """Something the user should read, as is."""
+    """Error message displayed directly in the UI."""
 
 
 class WsError(HebatError):
-    """The mobile-app route refused a call. code is Moodle's errorcode."""
+    """Mobile API error with a Moodle error code."""
     def __init__(self, code, message):
         super().__init__(message or code)
         self.code = code
@@ -79,7 +79,7 @@ def human(seconds):
 
 
 def parse_date(text):
-    """A date as Moodle prints it, English or Indonesian, read as WIB. None if there isn't one."""
+    """Parse English or Indonesian Moodle dates in WIB."""
     if m := DATE_DMY.search(text):
         day, mon, year, hh, mm, ampm = m.groups()
     elif m := DATE_MDY.search(text):
@@ -95,7 +95,7 @@ def parse_date(text):
 
 
 def lock_dates(box):
-    """(unlocks, locks) from a Restrict access note, either one None if the note doesn't give it."""
+    """Read opening and closing dates from a Restrict access notice."""
     unlocks = locks = None
     for m in re.finditer(r"([^<>]{0,60})<strong>(.*?)</strong>", str(box), re.S):
         words, text = m.group(1).lower(), html.unescape(re.sub(r"<[^>]+>", "", m.group(2)))
@@ -117,7 +117,7 @@ def lock_dates(box):
 
 
 def find_form(page, action):
-    """Moodle forms carry a hidden <input name="action">; find the form by its value."""
+    """Find a Moodle form by its hidden action field."""
     marker = page.find("input", {"name": "action", "value": action})
     return marker.find_parent("form") if marker else None
 
@@ -127,19 +127,19 @@ def find_form_fast(text, action):
 
 
 def accepted(r):
-    """Moodle answers a form it accepted on the assignment page with a redirect back to that page."""
+    """Check for a redirect to the assignment page after a successful form POST."""
     if r.is_redirect:
         return "/mod/assign/view.php" in r.headers.get("Location", "")
     return bool(re.search(r'http-equiv="refresh"[^>]*/mod/assign/view\.php', r.text))  # redirect page, debug mode
 
 
 def landed(state, before):
-    """Whether the submission state shows a save went through, given the state before the bot started."""
+    """Check whether the submission state changed after a save."""
     return state == "submitted" or (state == "draft" and before != "draft")
 
 
 def flatten(out, value, key=""):
-    """Nested parameters the way Moodle's REST server reads them: plugindata[onlinetext_editor][text]=..."""
+    """Encode nested parameters using Moodle REST bracket notation."""
     if not isinstance(value, (dict, list)):
         out[key] = value
         return out
@@ -153,7 +153,7 @@ def text_html(online_text):
 
 
 def form_data(form):
-    """What a browser would send for this form if you just clicked its main button."""
+    """Collect successful controls for the primary form action."""
     if isinstance(form, FastForm):
         return form.data.copy()
     data = {}
@@ -182,8 +182,7 @@ def form_data(form):
 
 
 def submission_state(page):
-    """'submitted', 'draft', 'new', 'reopened', or None when the page has no status table (no attempt yet,
-    or not a status page at all). Read from CSS classes, so it works whatever language HEBAT is in."""
+    """Read submitted, draft, new, or reopened from the status CSS class; otherwise return None."""
     el = page.find(class_=STATE_CLASS)
     if el:
         for c in el.get("class", []):
@@ -193,7 +192,7 @@ def submission_state(page):
 
 
 def overloaded(r, *args, **kwargs):
-    """Transport refusals and proxy challenge pages are outages, never evidence of a closed assignment."""
+    """Raise transport errors for HTTP failures and proxy challenge pages."""
     if r.status_code >= 400:
         raise requests.HTTPError(f"HTTP {r.status_code}", response=r)
     if 'text/html' in r.headers.get('Content-Type', '').lower() and re.search(
@@ -202,7 +201,7 @@ def overloaded(r, *args, **kwargs):
 
 
 def keep_awake(on):
-    """Stop Windows from sleeping while the bot waits. Applies to the calling thread until turned off."""
+    """Toggle the Windows sleep inhibitor for the calling thread."""
     if sys.platform == "win32":
         import ctypes
         ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if on else 0))
@@ -235,12 +234,11 @@ class Hebat:
     def relogin(self):
         started = wall_time()
         with self.login_lock:
-            if self.logged_in_at < started:  # skip if another thread logged in while we waited
+            if self.logged_in_at < started:  # Another thread may have refreshed the session while waiting for the lock.
                 self._login()
 
     def alive(self):
-        """Whether this login still works. Some Moodle sites cap how many logins an account can have at once and
-        end the oldest."""
+        """Check session validity; Moodle may expire older concurrent logins."""
         try:
             self.ajax("core_session_touch", {}, retry=False)
             return True
@@ -271,7 +269,7 @@ class Hebat:
 
     def get(self, path, timeout=20):
         r = self.s.get(BASE + path, timeout=timeout)
-        if "/login/index.php" in r.url:  # session expired: log in again and retry once
+        if "/login/index.php" in r.url:  # Refresh an expired session and retry once.
             self.relogin()
             r = self.s.get(BASE + path, timeout=timeout)
         return r
@@ -286,7 +284,7 @@ class Hebat:
             res = r.json()
         except ValueError:
             raise HebatError(f"HEBAT gave an unexpected answer (HTTP {r.status_code}).")
-        if isinstance(res, dict):  # the whole call was refused, usually an expired session
+        if isinstance(res, dict):  # Top-level API error, usually an expired session.
             if retry and res.get("errorcode") in ("invalidsesskey", "requireloginerror", "servicerequireslogin"):
                 self.relogin()
                 return self.ajax(method, args, retry=False)
@@ -296,7 +294,7 @@ class Hebat:
         return res[0]["data"]
 
     def clock_offset(self):
-        """Prefer PHP's clock in calendar upcoming-view data; Date is an explicitly labelled fallback."""
+        """Read the PHP clock through the calendar API, falling back to HTTP Date."""
         if self.token and 'core_calendar_get_calendar_upcoming_view' in self.ws_functions:
             try:
                 def php_time():
@@ -320,9 +318,7 @@ class Hebat:
         return offset
 
     def measure_clock(self, read):
-        """HEBAT's clock minus this PC's clock, in seconds. None if HEBAT didn't answer. The Date header only has whole
-        seconds, so this times the moment it ticks over to the next one, which is accurate to about a round trip
-        instead of half a second. Falls back to the plain reading if the round trip is too slow for that."""
+        """Estimate clock offset from whole-second samples, preferring second transitions."""
         last, flips, rough = None, [], []
         end = time.perf_counter() + 3
         while time.perf_counter() < end and len(flips) < 2 and len(rough) < 30:
@@ -333,7 +329,7 @@ class Hebat:
             mid = t0 + elapsed / 2
             self.rtt = elapsed
             rough.append((elapsed, sec + 0.5 - mid))
-            if last and sec - last[1] == 1 and mid - last[0] < 0.3:  # it ticked over between these two
+            if last and sec - last[1] == 1 and mid - last[0] < 0.3:  # Consecutive samples bracket a second boundary.
                 flips.append(sec - (last[0] + mid) / 2)
             last = (mid, sec)
             time.sleep(0.025)
@@ -342,7 +338,7 @@ class Hebat:
         return min(rough)[1] if rough else None
 
     def ws_login(self):
-        """A token for Moodle's mobile-app route, or None if HEBAT doesn't offer it."""
+        """Get a mobile API token, or return None if the service is unavailable."""
         try:
             res = self.ws_s.post(BASE + "/login/token.php", timeout=20, data={
                 "username": self.username, "password": self.password, "service": "moodle_mobile_app"}).json()
@@ -371,14 +367,11 @@ class Hebat:
         return res
 
     def ws(self, function, timeout=CHECK_TIMEOUT, **params):
-        """Call a function of the mobile-app route. Unlike the website, these don't take Moodle's session lock, so
-        any number can run at once, and the answers are a few bytes of JSON instead of whole pages."""
+        """Call the mobile REST API without taking a website session lock."""
         return self.send_ws(self.prepare_ws(function, **params), timeout)
 
     def ws_assignment(self, cmid, course_id):
-        """What the mobile-app route needs for this assignment: {"id": its instance id (not the cmid), "drafts":
-        whether it keeps drafts until "Submit assignment", or None if HEBAT won't say yet}. None if HEBAT doesn't
-        offer the route."""
+        """Load the assignment instance ID, draft setting, and available submission rules."""
         if not (self.token or self.ws_login()):
             return None
         site = self.ws("core_webservice_get_site_info")
@@ -391,7 +384,7 @@ class Hebat:
             for m in section.get("modules", []):
                 if m.get("id") == cmid:
                     info = {"id": m["instance"], "drafts": None}
-        if info:  # leaves out assignments Restrict access still hides; drafts stays unknown then
+        if info:  # Restricted assignments may be omitted from the metadata response.
             for course in self.ws("mod_assign_get_assignments", courseids=[course_id]).get("courses", []):
                 for a in course.get("assignments", []):
                     if a.get("cmid") == cmid:
@@ -408,7 +401,7 @@ class Hebat:
         return info
 
     def prepare_save(self, assign_id, draft_itemid, online_text):
-        """Encode the immutable mobile save before the timing-critical window."""
+        """Prepare the mobile save request before polling starts."""
         plugindata = {}
         if draft_itemid is not None:
             plugindata["files_filemanager"] = draft_itemid
@@ -439,7 +432,7 @@ class Hebat:
         return self.save_reply(self.send_ws(request), closed_until, checked_at)
 
     def ws_submit(self, assign_id):
-        """'Submit assignment' over the mobile-app route. True if HEBAT took it."""
+        """Submit a saved attempt for grading through the mobile API."""
         res = self.ws("mod_assign_submit_for_grading", assignmentid=assign_id, acceptsubmissionstatement=1)
         if res != []:
             raise WsError('submitrefused', f"HEBAT refused 'Submit assignment': {res}")
@@ -455,7 +448,7 @@ class Hebat:
                 'timelimit': attempt.get('timelimit', 0)}
 
     def courses(self):
-        """Your matkul: in-progress ones first, all of them if HEBAT marks none as in progress."""
+        """List in-progress courses, falling back to all enrolled courses."""
         for classification in ("inprogress", "all"):
             try:
                 found = self.ajax("core_course_get_enrolled_courses_by_timeline_classification", {
@@ -468,7 +461,7 @@ class Hebat:
         return self.courses_from_profile()
 
     def courses_from_profile(self):
-        """Fallback for older Moodle: the 'Course profiles' links on your profile page."""
+        """Read course links from the profile page on older Moodle versions."""
         found = {}
         for a in parse(self.get("/user/profile.php").text).select("a[href]"):
             href = a["href"]
@@ -479,8 +472,7 @@ class Hebat:
         return [{"id": cid, "name": name, "category": ""} for cid, name in found.items()]
 
     def assignments(self, course_id):
-        """Every assignment on the course page. Read from there, not the assignment index, because the index
-        leaves out ones locked by Restrict access, and lecturers lock each week's task until it opens."""
+        """Read assignments from the course page, including restricted activities omitted by the index."""
         page = parse(self.get(f"/course/view.php?id={course_id}").text)
         names, locked = {}, {}
         for li in page.select("li.activity.modtype_assign"):
@@ -514,8 +506,7 @@ class Hebat:
 
     @staticmethod
     def locked_info(cmid, box):
-        """What the course page says about an assignment you can't open yet. HEBAT won't show its own page,
-        so the opening time is the 'Available from' date."""
+        """Build assignment metadata from the course restriction notice."""
         unlocks, locks = lock_dates(box) if box else (None, None)
         now = datetime.now(WIB)
         if unlocks and unlocks > now:
@@ -523,7 +514,7 @@ class Hebat:
         elif locks and locks <= now:
             availability = "closed"
         else:
-            availability = "locked"  # some other condition, like a group or finishing another activity
+            availability = "locked"  # Non-date restriction, such as group membership or activity completion.
         return {
             "cmid": cmid, "title": "",
             "opens_ts": unlocks.timestamp() if unlocks else None, "opens": fmt(unlocks) if unlocks else None,
@@ -570,13 +561,13 @@ class Hebat:
         }
 
     def upload_repo_id(self, page_html=None):
-        """Id of the "Upload a file" repository, read from any page that has a file picker."""
+        """Find the upload repository ID in a page with a file picker."""
         page_html = page_html or self.get("/user/files.php").text
         m = re.search(r'"id":"?(\d+)"?,"name":"(?:[^"\\]|\\.)*","type":"upload"', page_html)
         return int(m.group(1)) if m else None
 
     def upload_draft(self, paths, repo_id):
-        """Upload files into a fresh private draft area. Returns its itemid, which the form then claims."""
+        """Upload files to a new private draft area and return its item ID."""
         itemid = random.randint(100_000_000, 999_999_999)
         for p in paths:
             with open(p, "rb") as fh:
@@ -593,7 +584,7 @@ class Hebat:
         return itemid
 
     def edit_form(self, cmid):
-        """The submission form, or None while HEBAT won't show it yet."""
+        """Load the submission form, or return None while access is restricted."""
         url = f"{BASE}/mod/assign/view.php?id={cmid}&action=editsubmission"
         checked_at = wall_time()
         r = self.s.get(url, timeout=CHECK_TIMEOUT, allow_redirects=False)
@@ -606,7 +597,7 @@ class Hebat:
         return form, r
 
     def check_web_refusal(self, r, checked_at=None):
-        """Never silently loop on validation errors, login pages, or unsupported timed attempts."""
+        """Reject validation errors, login pages, and unsupported timed attempts."""
         if r.is_redirect:
             path = urlparse(r.headers.get('Location', '')).path
             if path.endswith('/course/view.php') or path.endswith('/mod/assign/view.php'):
@@ -628,7 +619,7 @@ class Hebat:
         raise HebatError('HEBAT did not offer or accept the submission form, and did not report that it is not open yet. Check HEBAT now.')
 
     def prepare_blind_save(self, cmid, draft_itemid, online_text, first_only=False):
-        """Prepare a website save; stale lastmodified protects a previously empty attempt from repeats."""
+        """Prepare a website save with an optional stale lastmodified guard against repeat saves."""
         data = {"id": cmid, "userid": self.user_id, "action": "savesubmission", "sesskey": self.sesskey,
                 "_qf__mod_assign_submission_form": "1", "submissionstatement": "1", "submitbutton": "Save changes"}
         if first_only:
@@ -641,7 +632,7 @@ class Hebat:
         return self.s.prepare_request(requests.Request('POST', BASE + '/mod/assign/view.php', data=data))
 
     def blind_save(self, cmid, draft_itemid, online_text, first_only=False, prepared=None):
-        """Returns (saved, form, response); the form is present if Moodle needs additional fields."""
+        """Return (saved, form, response), preserving the form when Moodle requests additional fields."""
         prepared = prepared or self.prepare_blind_save(cmid, draft_itemid, online_text, first_only)
         checked_at = wall_time()
         r = self.s.send(prepared, timeout=CHECK_TIMEOUT, allow_redirects=False)
@@ -655,7 +646,7 @@ class Hebat:
         return False, form, r
 
     def save(self, cmid, form, draft_itemid, online_text, log, before=None):
-        """Fill in and save the submission form. Raises if HEBAT didn't take it."""
+        """Save the form and raise an error if Moodle rejects the submission."""
         data = form_data(form)
         takes_files, takes_text = "files_filemanager" in data, "onlinetext_editor[text]" in data
         if draft_itemid is not None:
@@ -679,7 +670,7 @@ class Hebat:
             return
         page = parse(r.text)
         if find_form(page, "savesubmission"):  # Moodle shows the form again when it rejects it
-            # A blind save on another login may have got in first, which makes this form out of date
+            # A concurrent save can invalidate this form.
             if landed(self.assignment_info(cmid)["state"], before):
                 return
             errors = [e.get_text(" ", strip=True) for e in page.select(".invalid-feedback, .alert-danger, .error")]
@@ -690,14 +681,13 @@ class Hebat:
                              "Check HEBAT now and submit by hand!")
 
     def submit_for_grading(self, cmid):
-        """The 'Submit assignment' step, sent without loading its page first: that form only ever holds these
-        fields. True if HEBAT took it. Harmless on a submission that's already submitted."""
+        """Post the grading confirmation without loading its form first."""
         return accepted(self.post("/mod/assign/view.php", timeout=CHECK_TIMEOUT, allow_redirects=False, data={
             "id": cmid, "action": "confirmsubmit", "sesskey": self.sesskey,
             "_qf__mod_assign_confirm_submission_form": "1", "submissionstatement": "1", "submitbutton": "Continue"}))
 
     def finalize(self, cmid):
-        """The 'Submit assignment' step, for assignments that keep submissions as drafts until you confirm."""
+        """Load and submit the grading confirmation form for a saved draft."""
         conf = find_form(parse(self.get(f"/mod/assign/view.php?id={cmid}&action=submit").text), "confirmsubmit")
         if not conf:
             raise HebatError("Saved as DRAFT, but the 'Submit assignment' step wasn't found. Submit it by hand!")
@@ -710,21 +700,20 @@ class Hebat:
 
 
 class Runner(threading.Thread):
-    """Waits for the target time, then submits the moment HEBAT shows the submission form.
+    """Schedule a submission and confirm its final state.
 
-    job: cmid, name, course, course_id, at (aware datetime, HEBAT's clock), files (list of Path), online_text, finalize
-    """
+    job contains cmid, name, course, course_id, at (WIB datetime), files, online_text, and finalize."""
 
     def __init__(self, bot, job, log):
         super().__init__(daemon=True)
         self.bot, self.job, self.log = bot, job, log
         self.stop_flag = threading.Event()
         self.state = "starting"  # starting, waiting, polling, submitting, done, failed, stopped
-        self.go = None  # this PC's timestamp for job["at"], after correcting for clock drift
+        self.go = None  # Target timestamp adjusted to the local clock.
         self.result = None
         self.last_hiccup = 0.0
-        self.bots = [bot]  # one login per overlapping check; see more_logins
-        self.ws_info = None  # set when the mobile-app route is used; see setup_ws
+        self.bots = [bot]  # One website session per concurrent check.
+        self.ws_info = None  # Mobile API assignment metadata.
         self.ws_limit = 6
         self.before_status = None
         self.saved_ack = threading.Event()
@@ -746,7 +735,7 @@ class Runner(threading.Thread):
             raise Stopped
 
     def sleep_until(self, ts):
-        # Short naps against the wall clock, so the PC sleeping and waking can't make us late.
+        # Recheck wall time periodically to account for suspend/resume.
         while (left := ts - wall_time()) > 0:
             self.pause(min(left, 20))
 
@@ -760,14 +749,14 @@ class Runner(threading.Thread):
         except (HebatError, requests.RequestException) as e:
             self.state, self.result = "failed", str(e) if isinstance(e, HebatError) else f"Network error: {e}"
             self.log(f"FAILED: {self.result}")
-        except Exception as e:  # never die silently while the user thinks the bot is on it
+        except Exception as e:  # Report unexpected failures to the UI.
             self.state, self.result = "failed", f"Unexpected error: {e!r}. Submit by hand!"
             self.log(f"FAILED: {self.result}")
         finally:
             keep_awake(False)
 
     def soft(self, what, fn):
-        """A step the submission doesn't depend on. HEBAT being slow here shouldn't end the run."""
+        """Run an optional setup step, tolerating network failures."""
         try:
             return fn()
         except requests.RequestException as e:
@@ -784,8 +773,7 @@ class Runner(threading.Thread):
         self.log(f"Your clock vs HEBAT: {offset:+.3f}s via {self.bot.clock_source} (compensating)")
 
     def fresh_session(self):
-        """Log in again close to the time (sessions expire after a few hours), retrying while HEBAT is slow.
-        If it never answers, the polling below logs in by itself once HEBAT is back."""
+        """Refresh the login before the opening, retaining the old session on failure."""
         while wall_time() < self.go - 60:
             try:
                 self.bot.login()
@@ -799,9 +787,9 @@ class Runner(threading.Thread):
                 return
 
     def more_logins(self, count):
-        """Extra logins for the checks around the target time. HEBAT (Moodle) locks a login's session while it
-        answers a request, so overlapping checks on one login just wait in line on the server, and the save would
-        wait behind them too. Logins that HEBAT ends straight away (a cap on logins per account) are dropped."""
+        """Create independent website sessions to avoid Moodle session-lock contention.
+
+        Drop sessions that Moodle immediately expires due to its concurrent-login limit."""
         def login():
             bot = Hebat(self.bot.username, self.bot.password)
             bot.login()
@@ -812,12 +800,12 @@ class Runner(threading.Thread):
         bots = [self.bot] + [f.result() for f in done if not f.exception()]
         checks = {pool.submit(b.alive): b for b in bots}
         done, _ = wait(checks, timeout=max(self.go - 15 - wall_time(), 0))
-        pool.shutdown(wait=False, cancel_futures=True)  # anything still out is too slow to count on
+        pool.shutdown(wait=False, cancel_futures=True)  # Exclude sessions that missed the setup deadline.
         self.bots = [checks[f] for f in done if f.result()] or [self.bot]
         self.log(f"Ready with {len(self.bots)} separate logins for checking.")
 
     def setup_ws(self):
-        """Use the mobile-app route for the blind saves if HEBAT offers it (see Hebat.ws)."""
+        """Detect mobile API support for this assignment."""
         course_id = self.job.get("course_id")
         try:
             self.ws_info = course_id and self.bot.ws_assignment(self.job["cmid"], course_id) or None
@@ -948,7 +936,7 @@ class Runner(threading.Thread):
             self.submit_ack.set()
 
     def warm(self):
-        """Warm connections in background; a slow HEAD must never hold up a save."""
+        """Warm connections in background threads without delaying saves."""
         sessions = [b.s for b in self.bots] + ([self.bot.ws_s] * self.ws_limit if self.ws_info else [])
         def touch(session):
             try:
@@ -1026,7 +1014,7 @@ class Runner(threading.Thread):
             self.saved_ack.set()
         if not self.submit_ack.is_set() and job['finalize'] and (self.ws_info or {}).get('drafts') is not False:
             self.press_submit(bot, immediate)
-        # No progress/console logging is allowed between a confirmed save and its first submit request.
+        # Log after the submit attempt.
         self.log(f"Saved ({self.aim.relative():+.2f}s from the target); checking the recorded status.")
         state = self.final_state(bot)
         if state == 'draft' and job['finalize']:
@@ -1046,7 +1034,7 @@ class Runner(threading.Thread):
                 self.quick_submit(bot)
                 return
             except WsError:
-                # Check status before a web fallback: a concurrent save may already be submitted.
+                # Check for a completed submission before falling back to the website.
                 if self.final_state(bot) == 'submitted':
                     self.submit_ack.set()
                     return
@@ -1055,7 +1043,7 @@ class Runner(threading.Thread):
                 return
             except requests.RequestException as e:
                 if time.perf_counter() >= end:
-                    return  # final_state still runs, including after an ambiguous submit timeout.
+                    return  # Final status verification handles an ambiguous submit timeout.
                 self.hiccup(e)
                 self.pause(0.4)
 
@@ -1070,7 +1058,7 @@ class Runner(threading.Thread):
                 self.pause(1)
 
     def recovered_save(self):
-        """A final read after draining requests, never mistake an old draft/submission for this save."""
+        """Check for a newly saved submission after outstanding requests have settled."""
         current = self.status()
         before = self.before_status
         if self.saved_ack.is_set():
@@ -1085,7 +1073,7 @@ class Runner(threading.Thread):
         return changed
 
     def wait_for_form(self, blind, draft, first_only):
-        """Bounded burst, then drain. Retry mobile saves only after every prior save was refused."""
+        """Run the opening burst, then drain requests before retrying explicitly refused saves."""
         cmid, text = self.job['cmid'], self.job['online_text']
         events, free = queue.Queue(), list(self.bots)
         out = {'ws': 0, 'web': 0}
@@ -1123,11 +1111,11 @@ class Runner(threading.Thread):
                         self.saved_ack.set()
                         self.stop_sends.set()
                     if first and not self.stop_flag.is_set():
-                        # This very worker sends the already-prepared submit before yielding or logging.
+                        # Submit from the accepting worker to avoid another scheduling hop.
                         try:
                             self.quick_submit(bot or self.bot)
                         except (HebatError, requests.RequestException):
-                            pass  # drained status check and press_submit handle ambiguous/failing submits.
+                            pass  # Reconcile after draining requests; press_submit handles retries.
             except Exception as exc:
                 result = exc
             finally:
@@ -1171,7 +1159,7 @@ class Runner(threading.Thread):
                         return winner, None, None
                     if pending_form and not (fatal or uncertain or self.stop_flag.is_set()):
                         return pending_form
-                    # A save might have reached PHP after its response timed out. Always check once.
+                    # A timed-out request may still have saved the submission.
                     try:
                         if self.recovered_save():
                             return self.bot, None, None
@@ -1192,7 +1180,7 @@ class Runner(threading.Thread):
                 gap = ((WS_GAP if t >= -0.1 else 0.05) if use_ws else PEAK_GAP) if peak else (BURST_GAP if t < BURST_UNTIL else
                       FAST_POLL if t < FAST_WINDOW else SLOW_POLL)
                 retry = use_ws and t >= SAVE_CUTOFF
-                # After cutoff, all earlier replies must be explicit refusals before another save.
+                # After cutoff, retry only once all outstanding saves have been refused.
                 can_send = not self.stop_sends.is_set() and t >= next_at and t >= cooldown
                 if retry or t >= BURST_UNTIL:
                     can_send = can_send and sum(out.values()) == 0
@@ -1201,7 +1189,7 @@ class Runner(threading.Thread):
                     kind = 'form' if scout else 'ws' if use_ws else 'save'
                     if send(kind, peak, retry):
                         sent += 1
-                        # Never catch up missed slots by emitting a cluster of requests.
+                        # Schedule from the current time to avoid catch-up bursts.
                         next_at = t + (max(gap, FAST_POLL) if retry else gap)
                         if t < -PEAK_FROM:
                             next_at = max(t + (WS_GAP if use_ws else PEAK_GAP), min(next_at, -PEAK_FROM))
@@ -1247,7 +1235,7 @@ class Runner(threading.Thread):
                         pending_form = (bot, result[1], result[2])
                         self.stop_sends.set()
         finally:
-            # Requests have finite connect/read timeouts. Do not report completion while old saves still run.
+            # Drain requests before reporting completion.
             self.stop_sends.set()
             pool.shutdown(wait=True, cancel_futures=True)
             if precision is not None:
@@ -1255,7 +1243,7 @@ class Runner(threading.Thread):
 
     def hiccup(self, e):
         now = wall_time()
-        if now - self.last_hiccup > 5:  # checks overlap, so one outage would otherwise log many times
+        if now - self.last_hiccup > 5:  # Rate-limit duplicate outage messages.
             self.last_hiccup = now
             self.log(f"HEBAT connection problem ({e.__class__.__name__}); checking the outcome before continuing.")
 
@@ -1267,7 +1255,7 @@ class Runner(threading.Thread):
             except requests.RequestException as e:
                 self.log(f"Network error while saving ({e.__class__.__name__}), attempt {attempt} of 3.")
             self.pause(1)
-            try:  # the save may have gone through even though the answer got lost
+            try:  # Check for a successful save before retrying a lost response.
                 if self.recovered_save():
                     return
                 form, _ = bot.edit_form(cmid)

@@ -1,4 +1,4 @@
-"""Connection and timing helpers. No network traffic or OS changes at import time."""
+"""HTTP sessions and Windows timing utilities."""
 import gc
 import os
 import ssl
@@ -27,7 +27,7 @@ def _windows_clock():
 
 
 def wall_time():
-    # Python before 3.13 uses a coarser Windows wall clock; QPC alone cannot fix that anchor.
+    # Use the precise Windows wall clock on Python versions before 3.13.
     return _windows_clock()() if sys.platform == 'win32' else time.time()
 
 
@@ -58,14 +58,13 @@ class CachedTLSAdapter(requests.adapters.HTTPAdapter):
     def cert_verify(self, conn, url, verify, cert):
         super().cert_verify(conn, url, verify, cert)
         if verify is True and url.lower().startswith('https'):
-            # The verified context already contains the CA store; urllib3 must not reload it.
+            # Reuse the CA store already loaded into the SSL context.
             conn.ca_certs = conn.ca_cert_dir = None
 
 
 def new_session(base, response_hook, capacity=18):
     session = requests.Session()
-    # Resolve environment/Windows proxy settings once, including NO_PROXY for this host.
-    # Disabling trust_env also avoids registry and netrc lookups on every prepared send.
+    # Resolve proxies once, including NO_PROXY; skip per-request registry and netrc lookups.
     session.proxies.update(requests.utils.get_environ_proxies(base))
     session.trust_env = False
     bundle = os.environ.get('REQUESTS_CA_BUNDLE') or os.environ.get('CURL_CA_BUNDLE') or requests.certs.where()
@@ -76,7 +75,7 @@ def new_session(base, response_hook, capacity=18):
 
 
 class PrecisionWindow:
-    """Restore process timing and GC settings even when a submission fails or is cancelled."""
+    """Temporarily adjust process timing and garbage collection for the opening burst."""
     def __enter__(self):
         self.gc_enabled = gc.isenabled()
         self.timer_started = False
@@ -122,7 +121,7 @@ class PrecisionWindow:
 
 
 class AimClock:
-    """Wall time for setup; a perf_counter deadline for the short timing-critical window."""
+    """Anchor the target wall time to a monotonic perf_counter deadline."""
     def __init__(self, target):
         self.target = time.perf_counter() + target - wall_time()
 

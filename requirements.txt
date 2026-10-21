@@ -1,4 +1,4 @@
 requests>=2.32.3
 beautifulsoup4
-# Optional: gives the app its own window instead of a browser tab.
+# Optional desktop window:
 # pywebview

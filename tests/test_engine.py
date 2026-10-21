@@ -22,7 +22,7 @@ def job(**values):
 
 
 class FakeBot:
-    """Local simulation only: accept at server opening, then delay the HTTP response."""
+    """Moodle stub with configurable response latency."""
     username = password = 'test'
     closed_notices = set()
     ws_functions = {'mod_assign_get_submission_status'}

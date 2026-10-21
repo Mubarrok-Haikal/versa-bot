@@ -1,4 +1,4 @@
-"""Extract successful Moodle form controls without building a page-sized DOM."""
+"""Extract Moodle form controls without building a full DOM."""
 import html
 import re
 from dataclasses import dataclass

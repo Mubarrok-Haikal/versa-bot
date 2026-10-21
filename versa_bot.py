@@ -1,11 +1,6 @@
-"""versa-bot: pick an assignment on HEBAT UNAIR, and the bot submits your file the moment it opens.
+"""Desktop entry point and local HTTP API for versa-bot.
 
-    pip install -r requirements.txt
-    python versa_bot.py
-
-Opens in its own window if pywebview is installed (pip install pywebview), otherwise in your browser.
-Keep it running until the bot is done: closing it stops the bot. Your password is only kept in memory.
-"""
+Run with python versa_bot.py. Uses pywebview when installed, otherwise opens a browser."""
 import atexit
 import json
 import queue
@@ -52,7 +47,7 @@ class App:
             try:
                 print(line, flush=True)
             except (OSError, ValueError):
-                pass  # GUI log remains available if the console closes.
+                pass  # Console failures do not affect the in-app log.
 
     def log(self, msg):
         t = datetime.now(engine.WIB).strftime("%H:%M:%S.%f")[:-3]
@@ -63,7 +58,7 @@ class App:
         try:
             self.console.put_nowait(f"[{t}] {msg}")
         except queue.Full:
-            pass  # A selected/paused Windows console must never block submission or the UI log.
+            pass  # Drop console output if printing is blocked by a text selection.
 
     def busy(self):
         return self.runner is not None and self.runner.is_alive()
@@ -73,7 +68,7 @@ class App:
             raise engine.HebatError("You're logged out. Log in again.")
         return self.bot
 
-    # --- API routes: each takes the query dict and the JSON body, returns something JSON-able ---
+    # API handlers accept query parameters and a JSON body, and return JSON-compatible data.
 
     def state(self, q, body):
         since = int(q.get("since") or 0)
@@ -192,7 +187,7 @@ def save_settings(**values):
     try:
         SETTINGS.write_text(json.dumps({**load_settings(), **values}, indent=2), encoding="utf-8")
     except OSError:
-        pass  # remembering the NIM is a convenience, not worth failing a login over
+        pass  # Saving the username is optional.
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -209,8 +204,7 @@ class Handler(BaseHTTPRequestHandler):
         self.api("POST", urlparse(self.path))
 
     def api(self, method, url):
-        # Only this app's own page may call the API: other websites can't set the token header,
-        # and the Host check stops DNS-rebinding tricks.
+        # Require the local app token and validate Host to prevent DNS rebinding.
         if self.headers.get("X-Token") != TOKEN or self.headers.get("Host") not in (f"127.0.0.1:{PORT}", f"localhost:{PORT}"):
             return self.reply_json(403, {"error": "Forbidden"})
         raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -243,7 +237,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class Server(ThreadingHTTPServer):
-    # On Windows, address reuse lets a second copy bind a port the first is still using; we want the error.
+    # Windows address reuse can let a second instance bind an occupied port.
     allow_reuse_address = sys.platform != "win32"
 
 
@@ -251,7 +245,7 @@ def main():
     global PORT
     try:
         server = Server(("127.0.0.1", 8765), Handler)
-    except OSError:  # port taken, maybe by another copy of this app: let the OS pick one
+    except OSError:  # Let the OS choose a port if the default is occupied.
         server = Server(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
     PORT = server.server_address[1]

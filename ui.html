@@ -512,7 +512,7 @@ function assignRow(a) {
 
 function pick(cmid) {
   const a = S.assigns.find((x) => x.cmid === cmid);
-  S.picked = { ...a, course: S.course.name };
+  S.picked = { ...a, course: S.course.name, course_id: S.course.id };
   S.actionErr = null;
   if (S.job) { S.job = null; api('/api/dismiss', { method: 'POST', body: {} }).catch(() => {}); }  // a new pick replaces the last result
   const canOpen = a.availability === 'open' || (a.availability === 'upcoming' && a.opens_ts);
@@ -608,7 +608,7 @@ $('#actions').addEventListener('click', async (e) => {
     if (b.id === 'startBtn') {
       b.disabled = true;
       await api('/api/start', { method: 'POST', body: {
-        cmid: S.picked.cmid, name: S.picked.name, course: S.picked.course, at: targetTs(),
+        cmid: S.picked.cmid, name: S.picked.name, course: S.picked.course, course_id: S.picked.course_id, at: targetTs(),
         finalize: $('#finalize').checked, online_text: onlineText(), files: readyFiles().map((f) => f.id),
       } });
     } else if (b.id === 'stopBtn') {

@@ -131,10 +131,12 @@ class App:
         try:
             at = datetime.fromtimestamp(float(body["at"]), engine.WIB)
             cmid = int(body["cmid"])
+            course_id = int(body.get("course_id") or 0)
         except (KeyError, TypeError, ValueError):
             raise engine.HebatError("Pick an assignment and a time first.")
         job = {"cmid": cmid, "name": body.get("name") or f"Assignment {cmid}", "course": body.get("course") or "",
-               "at": at, "files": files, "online_text": text, "finalize": bool(body.get("finalize", True))}
+               "course_id": course_id, "at": at, "files": files, "online_text": text,
+               "finalize": bool(body.get("finalize", True))}
         self.log(f"Bot started for '{job['name']}'.")
         self.runner = engine.Runner(bot, job, self.log)
         self.runner.start()

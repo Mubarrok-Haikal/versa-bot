@@ -289,6 +289,30 @@ class APIAndPreflightTests(unittest.TestCase):
             r.preflight()
             self.b.ajax.assert_called_once()
 
+    def test_preflight_tolerates_refused_form_page(self):
+        r = engine.Runner(self.b, job(), Mock())
+        r.ws_info = None
+        response = requests.Response()
+        response.status_code = 404
+        self.b.edit_form = Mock(side_effect=requests.HTTPError('HTTP 404', response=response))
+        r.preflight()
+        self.assertIn('HTTP 404', r.log.call_args_list[0].args[0])
+
+    def test_date_fallback_reads_error_responses(self):
+        response = requests.Response()
+        response.status_code = 404
+        response.headers['Date'] = 'Mon, 26 Oct 2026 06:30:26 GMT'
+        session = Mock()
+        session.__enter__ = Mock(return_value=session)
+        session.__exit__ = Mock(return_value=False)
+        session.head = Mock(side_effect=requests.HTTPError('HTTP 404', response=response))
+        def measure(read):
+            self.assertEqual(read(), 1792996226.0)
+            return 0.25
+        self.b.measure_clock = measure
+        with patch('engine.new_session', return_value=session):
+            self.assertEqual(self.b.clock_offset(), 0.25)
+
     def test_php_clock_preferred_over_date(self):
         self.b.token = 'test'
         self.b.ws_functions = {'core_calendar_get_calendar_upcoming_view'}

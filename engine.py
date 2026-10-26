@@ -308,7 +308,12 @@ class Hebat:
                 pass
         with new_session() as session:
             def header_time():
-                r = session.head(BASE + CLOCK_PROBE, timeout=(1, 1.5))
+                try:
+                    r = session.head(BASE + CLOCK_PROBE, timeout=(1, 1.5))
+                except requests.HTTPError as e:  # An error page (e.g. 404) still carries the server's Date.
+                    if e.response is None or 'Date' not in e.response.headers:
+                        raise
+                    r = e.response
                 return parsedate_to_datetime(r.headers['Date']).timestamp()
             try:
                 offset = self.measure_clock(header_time)
@@ -839,7 +844,12 @@ class Runner(threading.Thread):
         if not rules:
             opens = (self.before_status or {}).get('opens_ts')
             self.bot.closed_until = float(opens) - self.offset if opens else 0
-            form, _ = self.bot.edit_form(self.job['cmid'])
+            try:
+                form, _ = self.bot.edit_form(self.job['cmid'])
+            except requests.RequestException as e:
+                # Before opening, HEBAT may refuse the form page outright (HTTP 404); polling retries it.
+                self.log(f"Couldn't load the submission form yet ({e}); HEBAT will check it when saving.")
+                form = None
             if form:
                 data = form_data(form)
                 if files and 'files_filemanager' not in data:
